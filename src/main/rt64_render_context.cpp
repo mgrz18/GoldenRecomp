@@ -585,6 +585,22 @@ void zelda64::renderer::RT64Context::send_dl(const OSTask* task) {
             write_s16(10, 1);  // m[1][1] int = 1
             write_s16(20, 1);  // m[2][2] int = 1
             write_s16(30, 1);  // m[3][3] int = 1
+            // 2026-05-04: GE_MV_TZ=N injects translate(0,0,-N) so vertices
+            // with z=0 don't produce w=0 when combined with perspective
+            // (m[2][3]=-1 → w_out = -z_in). Default 0 = identity. Use with
+            // GE_INJECT_PERSPECTIVE.
+            int tz = 0;
+            const char *e = getenv("GE_MV_TZ");
+            if (e) tz = std::atoi(e);
+            if (tz != 0) {
+                // translate(0,0,-tz): m[3] (translation row in libultra row-major) → m[3][2] = -tz
+                // But hlslpp/RT64 reads as XOR-pair fixed point. Standard libultra translate:
+                // m[3] = [tx, ty, tz, 1] in last row.
+                // For -tz: int=-1*tz_high...; for tz=5000, int=5000<<16=... wait simpler:
+                // Use s16 int + u16 frac. -5000 = int=-5000, frac=0.
+                write_s16(28, (int16_t)(-tz));  // m[3][2] int = -tz
+                fprintf(stderr, "[send_dl] modelview translation z = %d\n", -tz);
+            }
             idmv_injected = true;
             fprintf(stderr, "[send_dl] injected identity modelview at RDRAM 0x%08X\n", IDMV_RDRAM_ADDR);
         }
