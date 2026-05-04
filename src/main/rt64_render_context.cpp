@@ -1,5 +1,6 @@
 #include <memory>
 #include <cstring>
+#include <cstdlib>
 
 // Undefine problematic X11 macros before including RT64 headers
 #ifdef None
@@ -420,21 +421,34 @@ void zelda64::renderer::RT64Context::send_dl(const OSTask* task) {
             // Ortho scale=1/32768 means values ~3e-5. Y-flip means m[1][1] = -1/32768.
             //   1/32768  = int 0, frac 2    (= 2/65536)
             //  -1/32768  = int -1, frac 65534 (= (-1*65536 + 65534)/65536 = -2/65536)
-            // m[0][0] = 1/32768 (standard int16 world range → NDC). Vertex ±16000 → NDC ±0.49.
-            // Historically gave cleanest-looking output vs higher scales.
+            // 2026-05-04: GE_ORTHO_SCALE env var picks the scale exponent.
+            // Default 15 = 1/32768 (legacy, has produced visible green triangle).
+            // Each unit = frac value: 1/2^N → frac = 2^(16-N).
+            // N=15 → frac=2 (1/32768)  — legacy default
+            // N=14 → frac=4 (1/16384)  — wider, less degenerate tris but
+            //   non-deterministic FB output not clearly better in tests
+            // N=13 → frac=8 (1/8192)
+            // N=12 → frac=16 (1/4096)
+            int n = 15;
+            const char *e = getenv("GE_ORTHO_SCALE");
+            if (e) n = std::atoi(e);
+            if (n < 8) n = 8;
+            if (n > 15) n = 15;
+            int frac = 1 << (16 - n);
+            // m[0][0] = 1/2^N
             write_s16(0, 0);
-            write_s16(32, 2);
-            // m[1][1] = -1/32768 (flip Y)
+            write_s16(32, frac);
+            // m[1][1] = -1/2^N (flip Y)
             write_s16(10, -1);
-            write_s16(42, (int16_t)0xFFFE);
-            // m[2][2] = 1/32768
+            write_s16(42, (int16_t)(0x10000 - frac));
+            // m[2][2] = 1/2^N
             write_s16(20, 0);
-            write_s16(52, 2);
+            write_s16(52, frac);
             // m[3][3] = 1
             write_s16(30, 1);
             write_s16(62, 0);
             ortho_injected = true;
-            fprintf(stderr, "[send_dl] injected ortho projection (scale=1/32768, Y flipped) at RDRAM 0x%08X\n", ORTHO_RDRAM_ADDR);
+            fprintf(stderr, "[send_dl] injected ortho projection (scale=1/2048, Y flipped) at RDRAM 0x%08X\n", ORTHO_RDRAM_ADDR);
         }
         app->state->rsp->matrix(ORTHO_RDRAM_ADDR, 0x03);  // projection | load | no push
     }
