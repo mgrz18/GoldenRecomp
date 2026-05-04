@@ -1,6 +1,8 @@
 #include <memory>
 #include <cstring>
 #include <cstdlib>
+#include <cmath>
+#include <algorithm>
 
 // Undefine problematic X11 macros before including RT64 headers
 #ifdef None
@@ -449,6 +451,83 @@ void zelda64::renderer::RT64Context::send_dl(const OSTask* task) {
             write_s16(62, 0);
             ortho_injected = true;
             fprintf(stderr, "[send_dl] injected ortho projection (scale=1/2048, Y flipped) at RDRAM 0x%08X\n", ORTHO_RDRAM_ADDR);
+        }
+
+        // 2026-05-04: optional real-perspective projection (GE_INJECT_PERSPECTIVE=1).
+        // Replaces the ortho load with a libultra-style guPerspective matrix.
+        // GE vertex range is large (±2500 X/Z) so we scale by GE_PERSP_SCALE (default
+        // 1/2048) so the perspective divide gets sane post-transform coords.
+        // Layout matches guMtxF2L: 32 bytes int part [4][4] (s16), 32 bytes frac part
+        // [4][4] (u16). For each row i, col j: byte offset (i*8 + j*2) in int half,
+        // (32 + i*8 + j*2) in frac half. value = (int<<16 | frac) / 65536 (signed s32).
+        static constexpr uint32_t PERSP_RDRAM_ADDR = 0x007F0000; // overwrite same slot
+        if (getenv("GE_INJECT_PERSPECTIVE") != nullptr) {
+            uint8_t* r = app->core.RDRAM;
+            auto write_s16 = [&](uint32_t offset, int16_t val) {
+                uint32_t a = PERSP_RDRAM_ADDR + offset;
+                r[a ^ 3] = (val >> 8) & 0xFF;
+                r[(a + 1) ^ 3] = val & 0xFF;
+            };
+            auto inject_perspective = [&](float fovy_deg, float aspect, float near_v,
+                                          float far_v, float scale) {
+                float mf[4][4] = {{0}};
+                mf[0][0] = mf[1][1] = mf[2][2] = mf[3][3] = 1.0f;
+                float fovy = fovy_deg * 3.1415926f / 180.0f;
+                float cot = cosf(fovy * 0.5f) / sinf(fovy * 0.5f);
+                mf[0][0] = cot / aspect;
+                mf[1][1] = cot;
+                mf[2][2] = (near_v + far_v) / (near_v - far_v);
+                mf[2][3] = -1.0f;
+                mf[3][2] = (2.0f * near_v * far_v) / (near_v - far_v);
+                mf[3][3] = 0.0f;
+                // FIX 2026-05-04: scale ONLY the X/Y projection scale and the
+                // Z-row, NOT m[2][3]/m[3][3] which carry the perspective division
+                // semantics (m[2][3]=-1 makes w_out = -z_in). Scaling those broke
+                // the perspective: m[2][3] became -1/2048 → infinities everywhere
+                // after division. Apply scale as a pre-projection vertex shrink so
+                // GE's ±2500 vertex range maps into a sensible pre-perspective range.
+                mf[0][0] *= scale;
+                mf[1][1] *= scale;
+                mf[2][2] *= scale;
+                mf[3][2] *= scale;  // far*near term scales with z
+                // m[2][3]=-1, m[3][3]=0 stay raw.
+                // Y flip (RT64/host conventions vs libultra screen-space).
+                mf[1][1] = -mf[1][1];
+                // Zero all 64 bytes then write split fixed-point.
+                for (int b = 0; b < 64; b++) r[(PERSP_RDRAM_ADDR + b) ^ 3] = 0;
+                for (int i = 0; i < 4; i++) {
+                    for (int j = 0; j < 4; j++) {
+                        int32_t fx = (int32_t)(mf[i][j] * 65536.0f);
+                        int16_t hi = (int16_t)(fx >> 16);
+                        uint16_t lo = (uint16_t)(fx & 0xFFFF);
+                        uint32_t off_int  = (uint32_t)(i * 8 + j * 2);
+                        uint32_t off_frac = (uint32_t)(32 + i * 8 + j * 2);
+                        write_s16(off_int, hi);
+                        write_s16(off_frac, (int16_t)lo);
+                    }
+                }
+                fprintf(stderr,
+                    "[send_dl] injected PERSPECTIVE fovy=%.1f aspect=%.3f near=%.1f "
+                    "far=%.1f scale=%.6f at RDRAM 0x%08X\n  m=[%.4f %.4f %.4f %.4f / "
+                    "%.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f]\n",
+                    fovy_deg, aspect, near_v, far_v, scale, PERSP_RDRAM_ADDR,
+                    mf[0][0], mf[0][1], mf[0][2], mf[0][3],
+                    mf[1][0], mf[1][1], mf[1][2], mf[1][3],
+                    mf[2][0], mf[2][1], mf[2][2], mf[2][3],
+                    mf[3][0], mf[3][1], mf[3][2], mf[3][3]);
+            };
+            static bool persp_injected = false;
+            if (!persp_injected) {
+                float scale = 1.0f / 2048.0f;
+                if (const char* es = getenv("GE_PERSP_SCALE_DIV"))
+                    scale = 1.0f / std::max(1.0f, (float)std::atof(es));
+                float fovy = 60.0f, aspect = 4.0f / 3.0f, near_v = 10.0f, far_v = 30000.0f;
+                if (const char* e = getenv("GE_PERSP_FOVY")) fovy = (float)std::atof(e);
+                if (const char* e = getenv("GE_PERSP_NEAR")) near_v = (float)std::atof(e);
+                if (const char* e = getenv("GE_PERSP_FAR"))  far_v  = (float)std::atof(e);
+                inject_perspective(fovy, aspect, near_v, far_v, scale);
+                persp_injected = true;
+            }
         }
         app->state->rsp->matrix(ORTHO_RDRAM_ADDR, 0x03);  // projection | load | no push
     }
