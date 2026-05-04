@@ -105,3 +105,5 @@ GPL-3.0 (inherited from upstream).
 - [rt64](https://github.com/rt64/rt64) — RT64 renderer
 - [n64decomp](https://github.com/n64decomp) team — GoldenEye 007 decompilation reference
 - theboy — earlier upstream contributions referenced in `patches/workbench_theboy.c`
+
+This fork's investigation, instrumentation, and macOS-port work were carried out with assistance from [Claude](https://claude.com) (Anthropic) — primarily for reverse-engineering the F3D_Gold microcode, scheduler debugging, and build-system glue.
