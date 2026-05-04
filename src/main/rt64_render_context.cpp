@@ -311,13 +311,273 @@ zelda64::renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::rendere
 zelda64::renderer::RT64Context::~RT64Context() = default;
 
 void zelda64::renderer::RT64Context::send_dl(const OSTask* task) {
+    uint32_t ucode_addr = task->t.ucode & 0x3FFFFFF;
+    uint32_t ucode_data_addr = task->t.ucode_data & 0x3FFFFFF;
+    uint32_t data_ptr = task->t.data_ptr & 0x3FFFFFF;
+
+    static int dl_count = 0;
+    dl_count++;
+    // Dump first 64 bytes of DL data so we can see if the caller passed a real DL or
+    // a garbage pointer (e.g. CPU function text).
+    if (dl_count <= 5 && data_ptr < 0x800000) {
+        uint8_t* r = app->core.RDRAM;
+        fprintf(stderr, "[send_dl #%d] data_ptr=0x%08X first-64b:", dl_count, data_ptr);
+        for (int i = 0; i < 64; i++) {
+            uint32_t addr = (data_ptr + i) ^ 3;  // byte access in word-swapped RDRAM
+            uint8_t b = r[addr & 0x7FFFFF];
+            fprintf(stderr, "%s%02X", (i % 8 == 0 ? " " : ""), b);
+        }
+        fprintf(stderr, "\n");
+        // Also dump the full DL to disk for offline analysis
+        if (dl_count == 1) {
+            uint32_t sz = task->t.data_size;
+            if (sz > 0 && sz < 0x100000) {
+                char path[64];
+                snprintf(path, sizeof(path), "/tmp/ge_dl_%02d.bin", dl_count);
+                FILE* f = fopen(path, "wb");
+                if (f) {
+                    // Dump in BE byte order (as N64 would see) to be human-readable
+                    for (uint32_t i = 0; i < sz; i++) {
+                        uint32_t a = (data_ptr + i) ^ 3;
+                        fputc(r[a & 0x7FFFFF], f);
+                    }
+                    fclose(f);
+                    fprintf(stderr, "[dump] DL %u bytes -> %s\n", sz, path);
+                }
+            }
+        }
+    }
+    // One-shot dump: on the first send_dl call, write the game's loaded RSP ucode text
+    // and data to disk so we can disassemble it offline and implement missing opcodes.
+    if (dl_count == 1 && ucode_addr != 0 && ucode_data_addr != 0) {
+        uint8_t* r = app->core.RDRAM;
+        FILE* f1 = fopen("/tmp/ge_ucode_text.bin", "wb");
+        if (f1) {
+            // Dump a large region (16KB) just in case the ucode is bigger than 4KB.
+            // The actual size is task->ucode_size but we don't always trust that field.
+            fwrite(r + (ucode_addr & 0x3FFFFFF), 1, 0x4000, f1);
+            fclose(f1);
+            fprintf(stderr, "[dump] ucode text (ram 0x%08X, 16KB) -> /tmp/ge_ucode_text.bin\n", ucode_addr);
+        }
+        FILE* f2 = fopen("/tmp/ge_ucode_data.bin", "wb");
+        if (f2) {
+            fwrite(r + (ucode_data_addr & 0x3FFFFFF), 1, 0x800, f2);
+            fclose(f2);
+            fprintf(stderr, "[dump] ucode data (ram 0x%08X, 2KB) -> /tmp/ge_ucode_data.bin\n", ucode_data_addr);
+        }
+    }
+    // Align data_ptr DOWN to 8-byte boundary. With shadow-copy in submit_rsp_task,
+    // data_ptr is usually already aligned (shadow addr is 8-aligned). This is insurance.
+    uint32_t final_data_ptr = data_ptr & ~0x7u;
+
     app->state->rsp->reset();
-    app->interpreter->loadUCodeGBI(task->t.ucode & 0x3FFFFFF, task->t.ucode_data & 0x3FFFFFF, true);
-    app->processDisplayLists(app->core.RDRAM, task->t.data_ptr & 0x3FFFFFF, 0, true);
+    app->interpreter->loadUCodeGBI(ucode_addr, ucode_data_addr, true);
+
+    // Pre-configure the color image to a valid N64 framebuffer so RT64 has a valid
+    // render target before any draws. In GE, the DL's 0xFF opcode is not RDP SETCIMG —
+    // it's a task-state/flag handler — so we can't rely on the DL to set the image.
+    // Use the last VI_ORIGIN the game set; if VI_ORIGIN hasn't been set yet, fall back
+    // to 0x00026100 which is the secondary N64 framebuffer observed in GE.
+    // fmt=G_IM_FMT_RGBA(0), siz=G_IM_SIZ_16b(2), width=320.
+    uint32_t fb_addr = (VI_ORIGIN_REG != 0) ? VI_ORIGIN_REG : 0x00026100;
+    static int preconfig_log = 0;
+    if (++preconfig_log <= 5) {
+        fprintf(stderr, "[send_dl pre-config #%d] color=0x%08X (VI_ORIGIN=0x%08X) width=320 depth=0x0004C100\n",
+            preconfig_log, fb_addr, VI_ORIGIN_REG);
+    }
+    app->state->rsp->setColorImage(0, 2, 320, fb_addr);
+    // Also set the depth image to a conventional second buffer so any Z-tests have a
+    // valid target. GE's Z-buffer isn't observed yet; pick something non-colliding.
+    app->state->rsp->setDepthImage(0x0004C100);
+
+    // Inject an orthographic projection matrix that scales int16 vertex range to NDC.
+    // GE's vertex positions (observed: -28928, 9728, -5282 etc.) are in int16 range.
+    // Standard NDC is [-1, 1]. So ortho scale = 1/32768 maps int16 range correctly.
+    // N64 FixedMatrix: 32 bytes int rows then 32 bytes frac rows.
+    // For 1/32768: int_part=0, frac_part=2 (since 2/65536 = 1/32768).
+    // Matrix stored at DMEM format: row-major with separate int/frac halves.
+    {
+        static constexpr uint32_t ORTHO_RDRAM_ADDR = 0x007F0000;
+        uint8_t* r = app->core.RDRAM;
+        // FIX 2026-04-22: byte access in 32-bit-swapped RDRAM needs XOR 3, not XOR 2.
+        // A BE 16-bit value stored at N64 offset X has its high byte at host offset X^3
+        // and low byte at host offset (X+1)^3. XOR 2 was off-by-one, shifting bytes
+        // into neighbouring halfwords of the u32 and corrupting every matrix/viewport field.
+        auto write_s16 = [&](uint32_t offset, int16_t val) {
+            uint32_t a = ORTHO_RDRAM_ADDR + offset;
+            r[a ^ 3] = (val >> 8) & 0xFF;
+            r[(a + 1) ^ 3] = val & 0xFF;
+        };
+        static bool ortho_injected = false;
+        if (!ortho_injected) {
+            // Zero all 64 bytes
+            for (int i = 0; i < 64; i++) {
+                r[(ORTHO_RDRAM_ADDR + i) ^ 3] = 0;
+            }
+            // N64 FixedMatrix: int part bytes 0-31 then frac bytes 32-63, each row=8 bytes.
+            // FixedMatrix value = (int << 16 | frac) / 65536 interpreted as s32.
+            // For negative fractions we need int=-1 AND frac=(65536 + whole_frac).
+            // Ortho scale=1/32768 means values ~3e-5. Y-flip means m[1][1] = -1/32768.
+            //   1/32768  = int 0, frac 2    (= 2/65536)
+            //  -1/32768  = int -1, frac 65534 (= (-1*65536 + 65534)/65536 = -2/65536)
+            // m[0][0] = 1/32768 (standard int16 world range → NDC). Vertex ±16000 → NDC ±0.49.
+            // Historically gave cleanest-looking output vs higher scales.
+            write_s16(0, 0);
+            write_s16(32, 2);
+            // m[1][1] = -1/32768 (flip Y)
+            write_s16(10, -1);
+            write_s16(42, (int16_t)0xFFFE);
+            // m[2][2] = 1/32768
+            write_s16(20, 0);
+            write_s16(52, 2);
+            // m[3][3] = 1
+            write_s16(30, 1);
+            write_s16(62, 0);
+            ortho_injected = true;
+            fprintf(stderr, "[send_dl] injected ortho projection (scale=1/32768, Y flipped) at RDRAM 0x%08X\n", ORTHO_RDRAM_ADDR);
+        }
+        app->state->rsp->matrix(ORTHO_RDRAM_ADDR, 0x03);  // projection | load | no push
+    }
+
+    // Inject an N64 standard Vp (viewport) struct at a fixed RDRAM location and call
+    // setViewport so RT64 maps NDC [-1,1] to pixel [0,320] x [0,240]. Without this the
+    // viewport stays at default which may not cover the framebuffer.
+    // N64 Vp = 16 bytes: 4 × int16 vscale (with *4 fixed point), 4 × int16 vtrans.
+    // For 320x240 full-screen: scale=(640,480,511,0) trans=(640,480,511,0)
+    {
+        static constexpr uint32_t VP_RDRAM_ADDR = 0x007F00C0;
+        uint8_t* r = app->core.RDRAM;
+        // FIX 2026-04-22: see note in ortho block — byte access needs XOR 3, not XOR 2.
+        auto write_s16 = [&](uint32_t offset, int16_t val) {
+            uint32_t a = VP_RDRAM_ADDR + offset;
+            r[a ^ 3] = (val >> 8) & 0xFF;
+            r[(a + 1) ^ 3] = val & 0xFF;
+        };
+        static bool vp_injected = false;
+        if (!vp_injected) {
+            // vscale (0-7)
+            write_s16(0, 640);   // x scale
+            write_s16(2, 480);   // y scale
+            write_s16(4, 511);   // z scale
+            write_s16(6, 0);
+            // vtrans (8-15)
+            write_s16(8, 640);   // x translate
+            write_s16(10, 480);  // y translate
+            write_s16(12, 511);  // z translate
+            write_s16(14, 0);
+            vp_injected = true;
+            fprintf(stderr, "[send_dl] injected N64 viewport at RDRAM 0x%08X (320x240)\n", VP_RDRAM_ADDR);
+        }
+        app->state->rsp->setViewport(VP_RDRAM_ADDR);
+    }
+
+    // Inject identity modelview to override garbage the game's MV commands produce.
+    // Without this, the game's broken MV multiplies vertex world-coords × bogus values
+    // giving billions (we've observed X=6.7e10 instead of NDC range).
+    {
+        static constexpr uint32_t IDMV_RDRAM_ADDR = 0x007F0100;
+        uint8_t* r = app->core.RDRAM;
+        auto write_s16 = [&](uint32_t offset, int16_t val) {
+            uint32_t a = IDMV_RDRAM_ADDR + offset;
+            r[a ^ 3] = (val >> 8) & 0xFF;
+            r[(a + 1) ^ 3] = val & 0xFF;
+        };
+        static bool idmv_injected = false;
+        if (!idmv_injected) {
+            for (int i = 0; i < 64; i++) {
+                r[(IDMV_RDRAM_ADDR + i) ^ 3] = 0;
+            }
+            // Identity: int[i][i] = 1, all others 0
+            write_s16(0, 1);   // m[0][0] int = 1
+            write_s16(10, 1);  // m[1][1] int = 1
+            write_s16(20, 1);  // m[2][2] int = 1
+            write_s16(30, 1);  // m[3][3] int = 1
+            idmv_injected = true;
+            fprintf(stderr, "[send_dl] injected identity modelview at RDRAM 0x%08X\n", IDMV_RDRAM_ADDR);
+        }
+        app->state->rsp->matrix(IDMV_RDRAM_ADDR, 0x02);  // LOAD, modelview (no PROJ), no push
+    }
+
+    // GE_TEST_DL=1: synthesize a minimal "red fullscreen" DL in RDRAM and process THAT
+    // instead of the game's DL. If the screen turns red, RT64 can present a DL we built.
+    // If still black, the issue is in RT64's presentation pipeline, not the game's DL content.
+    if (getenv("GE_TEST_DL") != nullptr) {
+        static constexpr uint32_t TEST_DL_ADDR = 0x007F0200;
+        uint8_t* r = app->core.RDRAM;
+        auto write_u32 = [&](uint32_t offset, uint32_t val) {
+            *(uint32_t*)(r + TEST_DL_ADDR + offset) = val;
+        };
+        // Rebuild each frame so CIMG tracks current VI_ORIGIN — critical because
+        // RT64's present queue looks up framebuffer by VI address, not by last-set CIMG.
+        uint32_t vi_phys = VI_ORIGIN_REG & 0x00FFFFFF;
+        if (vi_phys == 0 || vi_phys >= 0x00800000) vi_phys = 0x00026100;
+        int o = 0;
+        write_u32(o+0, 0xFF10013F); write_u32(o+4, vi_phys); o += 8;       // G_SETCIMG
+        write_u32(o+0, 0xED000000); write_u32(o+4, 0x004FC3BC); o += 8;    // G_SETSCISSOR (0,0)-(319,239) mode=0
+        write_u32(o+0, 0xBA001402); write_u32(o+4, 0x00300000); o += 8;    // G_SETOTHERMODE_H: CYC_FILL
+        write_u32(o+0, 0xF7000000); write_u32(o+4, 0xF801F801); o += 8;    // G_SETFILLCOLOR: red
+        write_u32(o+0, 0xF64FC3BC); write_u32(o+4, 0x00000000); o += 8;    // G_FILLRECT (0,0)-(319,239)
+        write_u32(o+0, 0xE9000000); write_u32(o+4, 0x00000000); o += 8;    // G_RDPFULLSYNC
+        write_u32(o+0, 0xB8000000); write_u32(o+4, 0x00000000); o += 8;    // G_ENDDL
+        static int testdl_log = 0;
+        if (++testdl_log <= 5) {
+            fprintf(stderr, "[send_dl] test DL targeting VI_ORIGIN=0x%08X\n", vi_phys);
+        }
+        app->processDisplayLists(app->core.RDRAM, TEST_DL_ADDR, TEST_DL_ADDR + 56, true);
+        return;
+    }
+
+    if (final_data_ptr != 0) {
+        uint32_t data_size = task->t.data_size;
+        if (data_size > 0 && data_size < 0x100000) {
+            app->processDisplayLists(app->core.RDRAM, final_data_ptr, final_data_ptr + data_size, true);
+        } else {
+            app->processDisplayLists(app->core.RDRAM, final_data_ptr, 0, true);
+        }
+    }
 }
 
 void zelda64::renderer::RT64Context::update_screen(uint32_t vi_origin) {
     VI_ORIGIN_REG = vi_origin;
+    static int us_log = 0;
+    if (++us_log <= 5 || us_log % 60 == 0) {
+        fprintf(stderr, "[update_screen #%d] VI_ORIGIN=0x%08X status=0x%X width=%u\n",
+            us_log, VI_ORIGIN_REG, VI_STATUS_REG, VI_WIDTH_REG);
+    }
+
+    // Red override disabled — proof-of-life achieved. Now let whatever RT64 renders
+    // (via DL processing) reach the screen unmodified. Keep the PPM dump to inspect
+    // what the game actually draws into VI_ORIGIN.
+    if (vi_origin != 0 && VI_WIDTH_REG > 0 && VI_WIDTH_REG <= 640) {
+        uint32_t phys = vi_origin & 0x3FFFFFF;
+        uint32_t width = VI_WIDTH_REG;
+        uint32_t height = 240;
+        uint32_t pixel_count = width * height;
+        uint8_t* r = app->core.RDRAM;
+        static int dump_counter = 0;
+        dump_counter++;
+        // Dump: first frame, periodic boot snapshots, plus every call once VI is pointing
+        // at a game-rendered FB (>=0x00050000 skips initial boot buffers).
+        bool is_game_origin = (vi_origin & 0x3FFFFFF) >= 0x00050000;
+        if (dump_counter == 1 || dump_counter % 30 == 0 || is_game_origin) {
+            char path[64];
+            snprintf(path, sizeof(path), "/tmp/ge_fb_%04d.ppm", dump_counter);
+            FILE* f = fopen(path, "wb");
+            if (f && phys + pixel_count * 2 < 0x800000) {
+                fprintf(f, "P6\n%u %u\n255\n", width, height);
+                for (uint32_t i = 0; i < pixel_count; i++) {
+                    uint32_t n64_addr = phys + i * 2;
+                    uint16_t p = *(uint16_t*)(r + (n64_addr ^ 2));
+                    uint8_t rr = ((p >> 11) & 0x1F) << 3;
+                    uint8_t gg = ((p >> 6) & 0x1F) << 3;
+                    uint8_t bb = ((p >> 1) & 0x1F) << 3;
+                    fputc(rr, f); fputc(gg, f); fputc(bb, f);
+                }
+                fclose(f);
+                fprintf(stderr, "[FB dump] wrote %s (%ux%u origin=0x%08X)\n", path, width, height, phys);
+            }
+        }
+    }
 
     app->updateScreen();
 }

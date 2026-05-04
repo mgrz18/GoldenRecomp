@@ -45,6 +45,12 @@ namespace recompui {
 	void set_current_menu(Menu menu);
 	Menu get_current_menu();
 
+	// Set true by draw_hook after it has processed a transition to Menu::None and
+	// called swap_document(None). Used by events.cpp to gate enable_instant_present
+	// so RT64's PresentEarly mode only activates AFTER the launcher is hidden
+	// (otherwise draw_hook stops firing before the hide propagates).
+	bool is_launcher_fully_hidden();
+
 	enum class ConfigSubmenu {
 		General,
 		Controls,

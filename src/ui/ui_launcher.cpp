@@ -5,6 +5,9 @@
 #include "RmlUi/Core.h"
 #include "nfd.h"
 #include <filesystem>
+#ifdef __APPLE__
+#include "zelda_support.h"
+#endif
 
 std::string version_number = "v1.0.0";
 
@@ -15,7 +18,16 @@ extern std::vector<recomp::GameEntry> supported_games;
 
 void select_rom() {
 	nfdnchar_t* native_path = nullptr;
-	nfdresult_t result = NFD_OpenDialogN(&native_path, nullptr, 0, nullptr);
+	nfdresult_t result = NFD_CANCEL;
+
+#ifdef __APPLE__
+    // NSOpenPanel must be created on the main thread on macOS.
+    zelda64::dispatch_sync_on_ui_thread([&]() {
+        result = NFD_OpenDialogN(&native_path, nullptr, 0, nullptr);
+    });
+#else
+    result = NFD_OpenDialogN(&native_path, nullptr, 0, nullptr);
+#endif
 
 	if (result == NFD_OKAY) {
 		std::filesystem::path path{native_path};

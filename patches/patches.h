@@ -20,6 +20,9 @@
 #define osContGetReadData osContGetReadData_recomp
 #define osContStartQuery osContStartQuery_recomp
 #define osContGetQuery osContGetQuery_recomp
+#define osEepromProbe osEepromProbe_recomp
+#define osEepromRead osEepromRead_recomp
+#define osEepromWrite osEepromWrite_recomp
 #define osPiStartDma osPiStartDma_recomp
 #define osStartThread osStartThread_recomp
 

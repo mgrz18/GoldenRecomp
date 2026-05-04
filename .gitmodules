@@ -1,6 +1,6 @@
 [submodule "lib/N64ModernRuntime"]
 	path = lib/N64ModernRuntime
-	url = https://github.com/kholdfuzion/N64ModernRuntime.git
+	url = https://github.com/mgrz18/N64ModernRuntime.git
 [submodule "lib/RmlUi"]
 	path = lib/RmlUi
 	url = https://github.com/mikke89/RmlUi.git
@@ -15,7 +15,7 @@
 	url = https://github.com/DLTcollab/sse2neon.git
 [submodule "lib/rt64"]
 	path = lib/rt64
-	url = https://github.com/rt64/rt64.git
+	url = https://github.com/mgrz18/rt64.git
 [submodule "lib/ge"]
 	path = lib/ge
 	url = https://github.com/kholdfuzion/goldeneye_src.git

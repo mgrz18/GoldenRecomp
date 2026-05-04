@@ -4,6 +4,8 @@
 
 #include <fstream>
 #include <filesystem>
+#include <execinfo.h>
+#include <cstdlib>
 #ifdef _WIN32
 #include <SDL_video.h>
 #else
@@ -31,18 +33,28 @@
 #include "InterfaceVS.hlsl.spirv.h"
 #include "InterfacePS.hlsl.spirv.h"
 
-#ifdef _WIN32
+#if defined(_WIN32)
 #   include "InterfaceVS.hlsl.dxil.h"
 #   include "InterfacePS.hlsl.dxil.h"
+#elif defined(__APPLE__)
+#   include "InterfaceVS.hlsl.metal.h"
+#   include "InterfacePS.hlsl.metal.h"
 #endif
 
-#ifdef _WIN32
+#if defined(_WIN32)
 #    define GET_SHADER_BLOB(name, format) \
         ((format) == RT64::RenderShaderFormat::SPIRV ? name##BlobSPIRV : \
         (format) == RT64::RenderShaderFormat::DXIL ? name##BlobDXIL : nullptr)
 #    define GET_SHADER_SIZE(name, format) \
         ((format) == RT64::RenderShaderFormat::SPIRV ? std::size(name##BlobSPIRV) : \
         (format) == RT64::RenderShaderFormat::DXIL ? std::size(name##BlobDXIL) : 0)
+#elif defined(__APPLE__)
+#    define GET_SHADER_BLOB(name, format) \
+        ((format) == RT64::RenderShaderFormat::SPIRV ? name##BlobSPIRV : \
+        (format) == RT64::RenderShaderFormat::METAL ? name##BlobMSL : nullptr)
+#    define GET_SHADER_SIZE(name, format) \
+        ((format) == RT64::RenderShaderFormat::SPIRV ? std::size(name##BlobSPIRV) : \
+        (format) == RT64::RenderShaderFormat::METAL ? std::size(name##BlobMSL) : 0)
 #else
 #    define GET_SHADER_BLOB(name, format) \
         ((format) == RT64::RenderShaderFormat::SPIRV ? name##BlobSPIRV : nullptr)
@@ -1286,6 +1298,13 @@ void draw_hook(RT64::RenderCommandList* command_list, RT64::RenderFramebuffer* s
 
     static recompui::Menu prev_menu = recompui::Menu::None;
     recompui::Menu cur_menu = open_menu.load();
+    {
+        static int dh_count = 0;
+        dh_count++;
+        if (dh_count <= 10 || dh_count % 60 == 0) {
+            fprintf(stderr, "[draw_hook #%d] prev=%d cur=%d\n", dh_count, (int)prev_menu, (int)cur_menu);
+        }
+    }
 
     if (reload_sheets) {
         ui_context->rml.load_documents();
@@ -1294,7 +1313,22 @@ void draw_hook(RT64::RenderCommandList* command_list, RT64::RenderFramebuffer* s
 
     bool menu_changed = cur_menu != prev_menu;
     if (menu_changed) {
+        fprintf(stderr, "[draw_hook] menu change: %d -> %d\n", (int)prev_menu, (int)cur_menu);
         ui_context->rml.swap_document(cur_menu);
+    }
+
+    // Signal "launcher hidden" once draw_hook has actually applied a transition
+    // to None (i.e., swap_document(None) just ran). events.cpp gates instant_present
+    // on this flag to avoid enabling PresentEarly before the launcher RmlUi content
+    // is hidden (PresentEarly stops draw_hook from firing, freezing the UI state).
+    {
+        static std::atomic<bool> launcher_hidden_flag{false};
+        if (cur_menu == recompui::Menu::None && prev_menu != recompui::Menu::None) {
+            launcher_hidden_flag.store(true);
+            fprintf(stderr, "[draw_hook] launcher fully hidden — instant_present now allowed\n");
+        }
+        extern std::atomic<bool> g_launcher_hidden;
+        g_launcher_hidden.store(launcher_hidden_flag.load());
     }
 
     recompui::ConfigSubmenu config_submenu = open_config_submenu.load();
@@ -1425,6 +1459,8 @@ void draw_hook(RT64::RenderCommandList* command_list, RT64::RenderFramebuffer* s
             }
 
             if (open_config) {
+                fprintf(stderr, "[draw_hook] OPENING CONFIG from event type=%d key=%d cbutton=%d\n",
+                        cur_event.type, cur_event.key.keysym.scancode, cur_event.cbutton.button);
                 cur_menu = recompui::Menu::Config;
                 open_menu.store(recompui::Menu::Config);
                 ui_context->rml.swap_document(cur_menu);
@@ -1482,6 +1518,16 @@ void recompui::set_render_hooks() {
 }
 
 void recompui::set_current_menu(Menu menu) {
+    fprintf(stderr, "[set_current_menu] %d (prev=%d)\n", (int)menu, (int)open_menu.load());
+    if (menu == recompui::Menu::Config || menu == recompui::Menu::Launcher) {
+        void* bt[8];
+        int n = ::backtrace(bt, 8);
+        char** syms = ::backtrace_symbols(bt, n);
+        if (syms) {
+            for (int i = 0; i < n; i++) fprintf(stderr, "  %s\n", syms[i]);
+            ::free(syms);
+        }
+    }
     open_menu.store(menu);
     if (menu == recompui::Menu::None) {
         ui_context->rml.system_interface->SetMouseCursor("arrow");
@@ -1497,6 +1543,18 @@ void recompui::destroy_ui() {
 
 recompui::Menu recompui::get_current_menu() {
     return open_menu.load();
+}
+
+std::atomic<bool> g_launcher_hidden{false};
+
+bool recompui::is_launcher_fully_hidden() {
+    return g_launcher_hidden.load();
+}
+
+// C-linkage bridge so ultramodern/events.cpp (which can't include C++-heavy recomp_ui.h)
+// can check whether the launcher has been hidden before enabling instant_present.
+extern "C" int recompui_is_launcher_fully_hidden(void) {
+    return g_launcher_hidden.load() ? 1 : 0;
 }
 
 void recompui::message_box(const char* msg) {

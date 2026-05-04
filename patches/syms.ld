@@ -77,3 +77,6 @@ osGetCount_recomp = 0x8F000104;
 sprintf_recomp = 0x8F000108;
 osPfsInit_recomp = 0x8F00010C;
 osMotorInit_recomp = 0x8F000110;
+
+/* gun.c - item statistics accessor, used by fire_rate.c patch */
+get_ptr_item_statistics = 0x7F05C8B4;

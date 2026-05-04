@@ -285,6 +285,7 @@ struct ControlOptionsContext {
 	int gyro_sensitivity; // 0 to 100
 	int mouse_sensitivity; // 0 to 100
 	int joystick_deadzone; // 0 to 100
+	int analog_threshold; // 10 to 90, representing 0.1 to 0.9 in tenths
     zelda64::TargetingMode targeting_mode;
 	recomp::BackgroundInputMode background_input_mode;
 	zelda64::AutosaveMode autosave_mode;
@@ -336,6 +337,17 @@ void recomp::set_joystick_deadzone(int deadzone) {
 	control_options_context.joystick_deadzone = deadzone;
 	if (general_model_handle) {
 		general_model_handle.DirtyVariable("joystick_deadzone");
+	}
+}
+
+int recomp::get_analog_threshold() {
+	return control_options_context.analog_threshold;
+}
+
+void recomp::set_analog_threshold(int threshold) {
+	control_options_context.analog_threshold = threshold;
+	if (general_model_handle) {
+		general_model_handle.DirtyVariable("analog_threshold");
 	}
 }
 
@@ -752,7 +764,7 @@ public:
 			throw std::runtime_error("Failed to make RmlUi data model for the controls config menu");
 		}
 
-		constructor.BindFunc("input_count", [](Rml::Variant& out) { out = recomp::get_num_inputs(); } );
+		constructor.BindFunc("input_count", [](Rml::Variant& out) { out = static_cast<int>(recomp::get_num_inputs()); } );
 		constructor.BindFunc("input_device_is_keyboard", [](Rml::Variant& out) { out = cur_device == recomp::InputDevice::Keyboard; } );
 
 		constructor.RegisterTransformFunc("get_input_name", [](const Rml::VariantList& inputs) {
@@ -959,6 +971,7 @@ public:
 		constructor.Bind("gyro_sensitivity", &control_options_context.gyro_sensitivity);
 		constructor.Bind("mouse_sensitivity", &control_options_context.mouse_sensitivity);
 		constructor.Bind("joystick_deadzone", &control_options_context.joystick_deadzone);
+		constructor.Bind("analog_threshold", &control_options_context.analog_threshold);
 		bind_option(constructor, "targeting_mode", &control_options_context.targeting_mode);
 		bind_option(constructor, "background_input_mode", &control_options_context.background_input_mode);
 		bind_option(constructor, "autosave_mode", &control_options_context.autosave_mode);

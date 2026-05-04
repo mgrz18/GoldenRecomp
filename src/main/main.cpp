@@ -7,6 +7,8 @@
 #include <numeric>
 #include <stdexcept>
 #include <cinttypes>
+#include <csignal>
+#include <execinfo.h>
 
 #include "nfd.h"
 
@@ -18,6 +20,12 @@
 #else
 #include "SDL2/SDL.h"
 #include "SDL2/SDL_syswm.h"
+#endif
+
+#ifdef __APPLE__
+#include "SDL2/SDL_metal.h"
+#include "zelda_support.h"
+#include <unistd.h>
 #endif
 
 #include "recomp_ui.h"
@@ -117,7 +125,15 @@ bool SetImageAsIcon(const char* filename, SDL_Window* window)
 SDL_Window* window; // RESOLUTION
 
 ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::gfx_data_t) {
-    window = SDL_CreateWindow("Goldeneye 007: Recompiled", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900, SDL_WINDOW_RESIZABLE );
+    uint32_t flags = SDL_WINDOW_RESIZABLE;
+
+#if defined(__APPLE__)
+    flags |= SDL_WINDOW_METAL;
+#elif defined(RT64_SDL_WINDOW_VULKAN)
+    flags |= SDL_WINDOW_VULKAN;
+#endif
+
+    window = SDL_CreateWindow("Goldeneye 007: Recompiled", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900, flags);
 #if defined(__linux__)
     SetImageAsIcon("icons/512.png",window);
     if (ultramodern::renderer::get_graphics_config().wm_option == ultramodern::renderer::WindowMode::Fullscreen) { // TODO: Remove once RT64 gets native fullscreen support on Linux
@@ -139,15 +155,11 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
     // Store thread ID elsewhere if needed
     // return window;
     return ultramodern::renderer::WindowHandle{ wmInfo.info.win.window, GetCurrentThreadId() };
-#elif defined(__ANDROID__)
-    static_assert(false && "Unimplemented");
-#elif defined(__linux__)
-    if (wmInfo.subsystem != SDL_SYSWM_X11) {
-        exit_error("Unsupported SDL2 video driver \"%s\". Only X11 is supported on Linux.\n", SDL_GetCurrentVideoDriver());
-    }
-    
-    // Store display info elsewhere if needed
-    return window;
+#elif defined(__linux__) || defined(__ANDROID__)
+    return ultramodern::renderer::WindowHandle{ window };
+#elif defined(__APPLE__)
+    SDL_MetalView view = SDL_Metal_CreateView(window);
+    return ultramodern::renderer::WindowHandle{ wmInfo.info.cocoa.window, SDL_Metal_GetLayer(view) };
 #else
     static_assert(false && "Unimplemented");
 #endif
@@ -177,6 +189,7 @@ static uint32_t discarded_output_frames;
 constexpr uint32_t bytes_per_frame = input_channels * sizeof(float);
 
 void queue_samples(int16_t* audio_data, size_t sample_count) {
+    if (audio_device == 0) return;  // audio disabled, drop samples
     // Buffer for holding the output of swapping the audio channels. This is reused across
     // calls to reduce runtime allocations.
     static std::vector<float> swap_buffer;
@@ -242,6 +255,7 @@ void queue_samples(int16_t* audio_data, size_t sample_count) {
 }
 
 size_t get_frames_remaining() {
+    if (audio_device == 0) return 0;  // audio disabled
     constexpr float buffer_offset_frames = 2.0f;
     // Get the number of remaining buffered audio bytes.
     uint64_t buffered_byte_count = SDL_GetQueuedAudioSize(audio_device);
@@ -298,7 +312,9 @@ void reset_audio(uint32_t output_freq) {
 
     audio_device = SDL_OpenAudioDevice(nullptr, false, &spec_desired, nullptr, 0);
     if (audio_device == 0) {
-        exit_error("SDL error opening audio device: %s\n", SDL_GetError());
+        fprintf(stderr, "[AUDIO] SDL_OpenAudioDevice failed: %s — continuing without audio for debugging\n", SDL_GetError());
+        output_sample_rate = output_freq;
+        return;
     }
     SDL_PauseAudioDevice(audio_device, 0);
 
@@ -309,10 +325,19 @@ void reset_audio(uint32_t output_freq) {
 // extern RspUcodeFunc njpgdspMain;
 extern RspUcodeFunc aspMain;
 
+// Stub audio ucode: GoldenEye's aspMain recomp hits ImemOverrun on every task which
+// wastes CPU and spams the scheduler with task failures. Return success without running.
+// TODO: regenerate the ucode recompilation properly to fix audio output.
+static RspExitReason stub_audio_ucode(uint8_t* rdram, uint32_t ucode_addr) {
+    (void)rdram; (void)ucode_addr;
+    return RspExitReason::Broke;
+}
+
 RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
     switch (task->t.type) {
     case M_AUDTASK:
-        return aspMain;
+        // return aspMain;   // original — fails with ImemOverrun
+        return stub_audio_ucode;
 
     // case M_NJPEGTASK:
     //     return njpgdspMain;
@@ -329,7 +354,7 @@ gpr get_entrypoint_address();
 // array of supported GameEntry objects
 std::vector<recomp::GameEntry> supported_games = {
     {
-        .rom_hash = 0x938df36777b0d0c9, // tblfree
+        .rom_hash = 0x8af1bfc6a5b348bd, // us 1.0 tlbfree
         .internal_name = "GOLDENEYE",
         .game_id = u8"ge007.us",
         .save_type = recomp::SaveType::Eep4k,
@@ -530,7 +555,61 @@ void release_preload(PreloadContext& context) {
 
 #endif
 
+static void crash_handler(int sig, siginfo_t* info, void* ucontext) {
+    void* bt[30];
+    int count = backtrace(bt, 30);
+    char** syms = backtrace_symbols(bt, count);
+
+    // Check if this is an ObjC/thread cleanup crash - skip it on ARM64
+    bool is_objc_crash = false;
+    if (syms) {
+        for (int i = 0; i < count; i++) {
+            if (strstr(syms[i], "AutoreleasePoolPage") ||
+                strstr(syms[i], "_pthread_tsd_cleanup") ||
+                strstr(syms[i], "objc_") ||
+                strstr(syms[i], "tls_dealloc") ||
+                strstr(syms[i], "_tlv_")) {
+                is_objc_crash = true;
+                break;
+            }
+        }
+    }
+
+    if (is_objc_crash) {
+        static int objc_crash_count = 0;
+        if (objc_crash_count++ < 5) {
+            fprintf(stderr, "[WARN] ObjC/thread crash suppressed (ignoring)\n");
+        }
+        if (syms) free(syms);
+        #if defined(__aarch64__)
+        ucontext_t* uc = (ucontext_t*)ucontext;
+        uc->uc_mcontext->__ss.__pc += 4;
+        return;
+        #else
+        _exit(128 + sig);
+        #endif
+    }
+
+    fprintf(stderr, "\n=== CRASH: signal %d (%s) at %p ===\n", sig,
+            sig == SIGBUS ? "SIGBUS" : sig == SIGSEGV ? "SIGSEGV" : "unknown",
+            info->si_addr);
+
+    if (syms) {
+        for (int i = 0; i < count; i++) {
+            fprintf(stderr, "  %s\n", syms[i]);
+        }
+        free(syms);
+    }
+    _exit(128 + sig);
+}
+
 int main(int argc, char** argv) {
+    struct sigaction sa = {};
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGBUS, &sa, nullptr);
+    sigaction(SIGSEGV, &sa, nullptr);
+
     recomp::Version project_version{};
     if (!recomp::Version::from_string(version_string, project_version)) {
         ultramodern::error_handling::message_box(("Invalid version string: " + version_string).c_str());
@@ -569,7 +648,16 @@ int main(int argc, char** argv) {
     // Force wasapi on Windows, as there seems to be some issue with sample queueing with directsound currently.
     SDL_setenv("SDL_AUDIODRIVER", "wasapi", true);
 #endif
-    //printf("Current dir: %ls\n", std::filesystem::current_path().c_str());
+#ifdef __APPLE__
+    // On macOS the working directory when launched as a .app bundle is not the
+    // Resources directory, so assets/ won't be found unless we change to it.
+    {
+        std::filesystem::path resources = zelda64::get_bundle_resource_directory();
+        if (!resources.empty()) {
+            chdir(resources.c_str());
+        }
+    }
+#endif
 
     // Initialize SDL audio and set the output frequency.
     SDL_InitSubSystem(SDL_INIT_AUDIO);
@@ -630,6 +718,24 @@ int main(int argc, char** argv) {
     ultramodern::threads::callbacks_t threads_callbacks{
         .get_game_thread_name = zelda64::get_game_thread_name,
     };
+
+    // Auto-start the game if -level_NN is on the command line (debugging aid).
+    bool autostart = false;
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "-level_", 7) == 0) { autostart = true; break; }
+    }
+    if (autostart) {
+        std::thread([](){
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            if (recomp::is_rom_valid(supported_games[0].game_id)) {
+                fprintf(stderr, "[AUTOSTART] ROM valid, calling start_game\n");
+                recomp::start_game(supported_games[0].game_id);
+                recompui::set_current_menu(recompui::Menu::None);
+            } else {
+                fprintf(stderr, "[AUTOSTART] ROM invalid, cannot auto-start\n");
+            }
+        }).detach();
+    }
 
     recomp::start(
         project_version,

@@ -9,12 +9,36 @@ elf_path = "ge007.tlbfree.elf"
 #symbols_file_path = "dump.toml"
 rom_file_path = "ge007.tlbfree.z64"
 
+# Audio sequencer functions not detected by N64Recomp's function finder
+# These are sub-functions within the __CSPPostNextSeqEvent region that are
+# called via function pointers / jump tables
+manual_funcs = [
+    { name = "__CSPSeqEventPost1", section = ".code", vram = 0x80011030, size = 0x3C },
+    { name = "__CSPProcessEvent", section = ".code", vram = 0x8001106C, size = 0x1CC },
+    { name = "__CSPHandleEvent", section = ".code", vram = 0x8001123C, size = 0x824 },
+    { name = "__CSPStubFunc", section = ".code", vram = 0x80011A60, size = 0xC },
+    { name = "__CSPHandleNextEvent", section = ".code", vram = 0x80011A6C, size = 0x614 },
+]
+
 [patches]
 stubs = [
+    # TLB management functions - stubbed because N64Recomp doesn't support TLB (cop0 registers)
+    # The PC port handles memory directly without TLB
+    "boot",               # cop0 TLB ops; RECOMP_PATCH in patches/boot.c calls init() directly
+    "resolve_TLBaddress_for_InvalidHit",
+    "initTLBPrepareContext",
+    "tlbRandomGetNext",
+    "tlbmanageEstablishManagementTable",
+    "tlbmanageGetIndexForEntry",
+    "tlbmanageGetTlbAllocatedBlock",
+    "tlbmanageRemoveEntry",
+    "tlbmanageRemoveEntryByIndex",
+    "tlbmanageResetCurrentEntriesCount",
+    "tlbmanageTranslateLoadRomFromTlbAddress",
+    "eqpower",
 ]
 
 ignored = [
-
 ]
 
 # [[patches.instruction]]

@@ -169,7 +169,7 @@ namespace recomp {
     // Rumble strength ranges from 0 to 100.
     int get_rumble_strength();
     void set_rumble_strength(int strength);
-    
+
     // Gyro and mouse sensitivities range from 0 to 100.
     int get_gyro_sensitivity();
     int get_mouse_sensitivity();
@@ -179,6 +179,11 @@ namespace recomp {
     void set_joystick_deadzone(int strength);
     void apply_joystick_deadzone(float x_in, float y_in, float* x_out, float* y_out);
     void set_right_analog_suppressed(bool suppressed);
+
+    // Analog axis digital threshold ranges from 0.1 to 0.9 (stored as int 10–90, representing tenths).
+    // A controller axis must exceed this fraction of its full range to register as a digital press.
+    int get_analog_threshold();
+    void set_analog_threshold(int threshold);
 
     enum class BackgroundInputMode {
         On,

@@ -1,4 +1,5 @@
 #include "patches.h"
+#include <stdio.h>
 
 int demoMode = 0;
 
@@ -502,6 +503,7 @@ RECOMP_PATCH void bossMainloop(void) {
 
 
     done = 0;
+    fprintf(stderr, "[PATCH bossMainloop] START g_StageNum=%d g_MainStageNum=%d\n", g_StageNum, g_MainStageNum);
     reset_mem_bank_5();
 
     if (tokenFind(1, "-level_") != NULL) {
@@ -596,9 +598,13 @@ RECOMP_PATCH void bossMainloop(void) {
         init_player_data_ptrs_construct_viewports(localSelectedNumPlayers);
         dynInitMemory();
         joyCheckStatusThreadSafe();
+        fprintf(stderr, "[PATCH] calling lvlStageLoad(%d)...\n", g_StageNum);
         lvlStageLoad(g_StageNum);
+        fprintf(stderr, "[PATCH] lvlStageLoad done. calling viInitBuffers...\n");
         viInitBuffers();
+        fprintf(stderr, "[PATCH] viInitBuffers done. debmenuInit...\n");
         debmenuInit();
+        fprintf(stderr, "[PATCH] waitForNextFrame...\n");
         waitForNextFrame();
         speedgraphMarkerCommit();
 
@@ -616,6 +622,7 @@ RECOMP_PATCH void bossMainloop(void) {
         if (1)
             ;
 
+        fprintf(stderr, "[PATCH] entering render loop g_MainStageNum=%d pendingGfx=%d\n", g_MainStageNum, pendingGfx);
         while (g_MainStageNum < 0 || pendingGfx != 0) {
             osRecvMesg(&gfxFrameMsgQ, (OSMesg*) &localGfxFrameMsg, OS_MESG_BLOCK);
 

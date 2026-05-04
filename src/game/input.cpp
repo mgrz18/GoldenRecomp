@@ -10,7 +10,8 @@
 #include "promptfont.h"
 #include "GamepadMotion.hpp"
 
-constexpr float axis_threshold = 0.5f;
+// axis_threshold is now configurable via recomp::get_analog_threshold().
+// The stored value is an integer (10–90) representing tenths of the 0.0–1.0 range.
 
 struct ControllerState {
     SDL_GameController* controller;
@@ -167,10 +168,20 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
     }
     case SDL_EventType::SDL_MOUSEWHEEL:
         {
-            SDL_MouseWheelEvent* wheel_event = &event->wheel;    
+            SDL_MouseWheelEvent* wheel_event = &event->wheel;
             InputState.mouse_wheel_pos.fetch_add(wheel_event->y * (wheel_event->direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1));
         }
         queue_if_enabled(event);
+        break;
+    case SDL_EventType::SDL_MOUSEBUTTONDOWN:
+        if (scanning_device != recomp::InputDevice::COUNT) {
+            if (scanning_device == recomp::InputDevice::Keyboard) {
+                SDL_MouseButtonEvent* button_event = &event->button;
+                set_scanned_input({(uint32_t)InputType::Mouse, button_event->button});
+            }
+        } else {
+            queue_if_enabled(event);
+        }
         break;
     case SDL_EventType::SDL_CONTROLLERBUTTONDOWN:
         if (scanning_device != recomp::InputDevice::COUNT) {
@@ -210,17 +221,18 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
 
             SDL_ControllerAxisEvent* axis_event = &event->caxis;
             float axis_value = axis_event->value * (1/32768.0f);
-            if (axis_value > axis_threshold) {
+            float cur_axis_threshold = recomp::get_analog_threshold() / 100.0f;
+            if (axis_value > cur_axis_threshold) {
                 SDL_Event set_stick_return_event;
                 set_stick_return_event.type = SDL_USEREVENT;
                 set_stick_return_event.user.code = axis_event->axis;
                 set_stick_return_event.user.data1 = nullptr;
                 set_stick_return_event.user.data2 = nullptr;
                 recompui::queue_event(set_stick_return_event);
-                
+
                 set_scanned_input({(uint32_t)InputType::ControllerAnalog, axis_event->axis + 1});
             }
-            else if (axis_value < -axis_threshold) {
+            else if (axis_value < -cur_axis_threshold) {
                 SDL_Event set_stick_return_event;
                 set_stick_return_event.type = SDL_USEREVENT;
                 set_stick_return_event.user.code = axis_event->axis;
@@ -602,7 +614,10 @@ float recomp::get_input_analog(const recomp::InputField& field) {
     case InputType::ControllerAnalog:
         return controller_axis_state(field.input_id, true);
     case InputType::Mouse:
-        // TODO mouse support
+        // Mouse buttons: input_id is the SDL button number (SDL_BUTTON_LEFT=1, SDL_BUTTON_RIGHT=3, etc.)
+        if (field.input_id >= 1 && field.input_id <= 5) {
+            return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON(field.input_id)) ? 1.0f : 0.0f;
+        }
         return 0.0f;
     case InputType::None:
         return false;
@@ -630,10 +645,12 @@ bool recomp::get_input_digital(const recomp::InputField& field) {
     case InputType::ControllerDigital:
         return controller_button_state(field.input_id);
     case InputType::ControllerAnalog:
-        // TODO adjustable threshold
-        return controller_axis_state(field.input_id, true) >= axis_threshold;
+        return controller_axis_state(field.input_id, true) >= (recomp::get_analog_threshold() / 100.0f);
     case InputType::Mouse:
-        // TODO mouse support
+        // Mouse buttons: input_id is the SDL button number (SDL_BUTTON_LEFT=1, SDL_BUTTON_RIGHT=3, etc.)
+        if (field.input_id >= 1 && field.input_id <= 5) {
+            return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON(field.input_id)) != 0;
+        }
         return false;
     case InputType::None:
         return false;
@@ -872,6 +889,17 @@ std::string controller_axis_to_string(int axis) {
     }
 }
 
+std::string mouse_button_to_string(int button) {
+    switch (button) {
+    case SDL_BUTTON_LEFT:   return "LMB";
+    case SDL_BUTTON_MIDDLE: return "MMB";
+    case SDL_BUTTON_RIGHT:  return "RMB";
+    case SDL_BUTTON_X1:     return "MB4";
+    case SDL_BUTTON_X2:     return "MB5";
+    default:                return "MB" + std::to_string(button);
+    }
+}
+
 std::string recomp::InputField::to_string() const {
     switch ((InputType)input_type) {
         case InputType::None:
@@ -882,6 +910,8 @@ std::string recomp::InputField::to_string() const {
             return controller_axis_to_string(input_id);
         case InputType::Keyboard:
             return keyboard_input_to_string((SDL_Scancode)input_id);
+        case InputType::Mouse:
+            return mouse_button_to_string(input_id);
         default:
             return std::to_string(input_type) + "," + std::to_string(input_id);
     }

@@ -32,8 +32,44 @@ extern "C" void osDpGetCounters_recomp(uint8_t* rdram, recomp_context* ctx) {
     // Empty
 }
 
+// Default GoldenEye setup token string. On the real N64, this data lives at
+// PI bus address 0x00FFB000 in a special cartridge region. The game reads it
+// via osPiReadIo to configure memory pools for each level.
+// Format: "-ml<N> -me<N> -mgfx<N> -mvtx<N> -mt<N> -ma<N>"
+// -ma = mema pool size in KB (most critical value)
+static const char ge_default_tokens[] = "-ml0 -me0 -mgfx100 -mvtx50 -mt625 -ma300";
+
 extern "C" void osPiReadIo_recomp(uint8_t* rdram, recomp_context* ctx) {
-    // Empty
+    // osPiReadIo(u32 devAddr, u32 *data): reads a word from PI bus
+    uint32_t devAddr = (uint32_t)ctx->r4;
+    gpr dataPtr = ctx->r5;
+
+    uint32_t value = 0;
+
+    if (devAddr >= recomp::rom_base) {
+        // Cart ROM range
+        uint32_t physical_addr = devAddr - recomp::rom_base;
+        auto rom = recomp::get_rom();
+        if (physical_addr + 4 <= rom.size()) {
+            value = (rom[physical_addr] << 24) | (rom[physical_addr+1] << 16) |
+                    (rom[physical_addr+2] << 8) | rom[physical_addr+3];
+        }
+    } else if (devAddr >= 0x00FFB000 && devAddr < 0x00FFB000 + 640) {
+        static bool logged = false;
+        if (!logged) { fprintf(stderr, "[INFO] osPiReadIo: reading tokens from 0x%08X\n", devAddr); logged = true; }
+        // GoldenEye token area - provide default setup string
+        uint32_t offset = devAddr - 0x00FFB000;
+        const uint8_t* src = (const uint8_t*)ge_default_tokens + offset;
+        uint32_t remaining = sizeof(ge_default_tokens) - offset;
+        uint8_t b0 = remaining > 0 ? src[0] : 0;
+        uint8_t b1 = remaining > 1 ? src[1] : 0;
+        uint8_t b2 = remaining > 2 ? src[2] : 0;
+        uint8_t b3 = remaining > 3 ? src[3] : 0;
+        value = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+    }
+
+    MEM_W(0, dataPtr) = (int32_t)value;
+    ctx->r2 = 0; // success
 }
 
 extern "C" void osPfsInit_recomp(uint8_t* rdram, recomp_context* ctx) {
@@ -169,6 +205,56 @@ extern "C" void recomp_time_us(uint8_t* rdram, recomp_context* ctx) {
 
 extern "C" void recomp_autosave_enabled(uint8_t* rdram, recomp_context* ctx) {
     _return(ctx, static_cast<s32>(zelda64::get_autosave_mode() == zelda64::AutosaveMode::On));
+}
+
+// @recomp: Patch the file table for setup files missing from the TLBFREE ROM.
+// These files were loaded via IndyComm in the dev build. We inject the correct
+// ROM offsets from the original retail ROM where the data is identical.
+// The file table is at 0x8012A344 with 12-byte entries: [compressed_size, metadata_ptr, rom_offset]
+extern "C" void recomp_patch_setup_file_table(uint8_t* rdram, recomp_context* ctx) {
+    // Setup file candidates from the original ROM (1172 compressed)
+    // These are the Usetup* files in filename table order:
+    // [0]=sevbunker, [1]=statue, [2]=control, [3]=arch, [4]=tra, [5]=dest,
+    // [6]=sevb, [7]=azt, [8]=pete, [9]=depo, [10]=ref, [11]=cryp,
+    // [12]=dam, [13]=ark, [14]=run, [15]=sevx, [16]=jun, [17]=dish,
+    // [18]=cave, [19]=cat, [20]=crad, [21]=sho
+    struct { uint32_t file_idx; uint32_t rom_offset; uint32_t comp_size; } patches[] = {
+        // File 727 = UsetupdamZ (candidate 12)
+        { 727, 0x421480, 0xE70 },
+    };
+
+    // Patch BOTH file tables:
+    // 12-byte table at 0x8012A344: [compressed_size, metadata_ptr, rom_offset]
+    gpr table12 = ADD32(S32(0X8013 << 16), -0X5CBC); // 0x8012A344
+    // 20-byte table at 0x8016CBA0: [word0, cached_addr, compressed_size, ...]
+    // word0 is decoded ROM offset, used by fileIndexLoadToBank
+    gpr table20 = ADD32(S32(0X8017 << 16), -0X3460); // 0x8016CBA0
+
+    for (auto& p : patches) {
+        // Patch 12-byte table
+        gpr entry12 = ADD32(table12, (gpr)(p.file_idx * 12));
+        if ((uint32_t)MEM_W(entry12, 8) == 0) {
+            MEM_W(entry12, 0) = (int32_t)p.comp_size;
+            MEM_W(entry12, 8) = (int32_t)p.rom_offset;
+        }
+
+        // Patch 20-byte table - set the compressed size at word[2] (offset 8)
+        // and ensure word[0] is non-zero (so fileIndexLoadToBank uses load_resource)
+        gpr entry20 = ADD32(table20, (gpr)(p.file_idx * 20));
+        MEM_W(entry20, 8) = (int32_t)p.comp_size; // compressed size
+
+        // Verify the write
+        uint32_t verify12 = (uint32_t)MEM_W(entry12, 8);
+        uint32_t verify20 = (uint32_t)MEM_W(entry20, 8);
+        fprintf(stderr, "[INFO] Patched file %d: ROM=0x%X size=0x%X (verify: 12tbl[8]=0x%X 20tbl[8]=0x%X)\n",
+                p.file_idx, p.rom_offset, p.comp_size, verify12, verify20);
+    }
+
+    // Set the mema pool size at 0x801084A0 (-ma token value)
+    // Normally set by tokenFind("-ma") → strtol("300") → 300 << 10 = 0x4B000
+    gpr mema_addr = ADD32(S32(0X8011 << 16), -0X7B60);
+    MEM_W(mema_addr, 0) = (int32_t)0x4B000;
+    fprintf(stderr, "[INFO] Pre-set mema pool size to 0x4B000 (300KB)\n");
 }
 
 extern "C" void recomp_load_overlays(uint8_t* rdram, recomp_context* ctx) {
