@@ -652,7 +652,10 @@ void zelda64::renderer::RT64Context::update_screen(uint32_t vi_origin) {
         // Dump: first frame, periodic boot snapshots, plus every call once VI is pointing
         // at a game-rendered FB (>=0x00050000 skips initial boot buffers).
         bool is_game_origin = (vi_origin & 0x3FFFFFF) >= 0x00050000;
-        if (dump_counter == 1 || dump_counter % 30 == 0 || is_game_origin) {
+        // 2026-05-04: dump every frame when env GE_DUMP_ALL=1, otherwise the
+        // original sparse pattern.
+        bool dump_all = (getenv("GE_DUMP_ALL") != nullptr);
+        if (dump_all || dump_counter == 1 || dump_counter % 30 == 0 || is_game_origin) {
             char path[64];
             snprintf(path, sizeof(path), "/tmp/ge_fb_%04d.ppm", dump_counter);
             FILE* f = fopen(path, "wb");
