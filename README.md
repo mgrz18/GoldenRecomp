@@ -103,6 +103,8 @@ This repo carries cumulative changes across all submodules to enable macOS build
 
 Read [docs/INVESTIGATION.md](docs/INVESTIGATION.md) for the consolidated technical knowledge from prior sessions: F3D_Gold spec extracted from `gmain.s`, all diagnostic env vars, hypothesis matrix, and pipeline diagrams.
 
+For **autonomous AI-agent contribution** (Claude Code, etc.) see [docs/MULTI_AGENT_ATTACK.md](docs/MULTI_AGENT_ATTACK.md) — there's a `scripts/harness.sh` that emits structured JSON metrics and a `/attack-blocker` slash command that runs the full hypothesize → patch → run → score → commit-or-revert loop autonomously against any blocker issue. This is how the project is designed to be attacked at scale.
+
 ## Roadmap
 
 - [ ] Solve at least one of the 6 open blockers → real game scene visible
