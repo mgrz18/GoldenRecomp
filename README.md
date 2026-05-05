@@ -92,14 +92,14 @@ This repo carries cumulative changes across all submodules to enable macOS build
 
 ## For contributors
 
-**Open blockers** (each has a GitHub issue with full context):
+**Open blockers** (each has a GitHub issue with full context — claim one!):
 
-1. [Make stall fix deterministic](../../issues) — bossMainloop sometimes gets 1 DONE per run, sometimes 152
-2. [Scene triangles not reaching pixel shader](../../issues) — rainbow-test confirms tris don't render in stall-recovered frames
-3. [F3D_Gold w1 encoding mystery](../../issues) — low-bits-0xB pattern in matrices, vertices, textures
-4. [Combiner producing alpha=0](../../issues) — coverage discard kills every fragment
-5. [Texture data corruption](../../issues) — loadBlock src=0x0060FFFB heap-aliased pattern
-6. [Real perspective without div/0](../../issues) — modelview translate + near/far tuning
+1. [#1 Make stall fix deterministic](https://github.com/mgrz18/GoldenRecomp/issues/1) — bossMainloop sometimes gets 1 DONE per run, sometimes 152
+2. [#2 F3D_Gold w1 encoding mystery](https://github.com/mgrz18/GoldenRecomp/issues/2) — low-bits-0xB pattern in matrices, vertices, textures
+3. [#3 Scene triangles not reaching pixel shader](https://github.com/mgrz18/GoldenRecomp/issues/3) — rainbow-test confirms tris don't render in stall-recovered frames
+4. [#4 Combiner producing alpha=0](https://github.com/mgrz18/GoldenRecomp/issues/4) — coverage discard kills every fragment
+5. [#5 Texture data corruption](https://github.com/mgrz18/GoldenRecomp/issues/5) — loadBlock src heap-aliased
+6. [#6 Real perspective without div/0](https://github.com/mgrz18/GoldenRecomp/issues/6) — modelview translate + near/far tuning
 
 Read [docs/INVESTIGATION.md](docs/INVESTIGATION.md) for the consolidated technical knowledge from prior sessions: F3D_Gold spec extracted from `gmain.s`, all diagnostic env vars, hypothesis matrix, and pipeline diagrams.
 
