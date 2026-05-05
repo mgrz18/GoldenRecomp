@@ -116,17 +116,23 @@ GE_FORCE_SHADE=1 GE_RAW_VTX_COLOR=1 GE_DEEP_SHADOW=1 GE_REMAP_VTX=1 GE_LOCK_MATR
 ### 1. Stall fix non-deterministic
 **Symptom:** bossMainloop receives 1 DONE per run sometimes, 152 DONEs other times. Same env vars, same code.
 
-**What we know:**
+**What we know (UPDATED 2026-05-05 via orchestrator dogfood):**
 - `__scTaskComplete` (`/tmp/ge_decomp/src/sched.c:406-433`) forwards `t->msg` to clientQ.
-- The msg sent is `&localGfxDoneMsg` — a stack OSScMsg in bossMainloop, NOT the static `g_bossGfxDoneMsg`.
-- Bogus OSTask submissions (`data_ptr=0x7FC00000`) have garbage in their OSScTask msg field too.
-- Our heal at `lib/N64ModernRuntime/ultramodern/src/events.cpp:614+` overwrites bogus msg with hardcoded `0x803B38B8`.
-- That hardcoded address is NOT actually `&g_bossGfxDoneMsg` — it was a guess from earlier memory. The OSScMsg there is uninitialised.
+- **`cur_msg = 0x803B38B8` in 100% of observed GFX submissions** — the hardcoded fallback IS the right address. Agent A's earlier hypothesis (that real address is stack-local `&localGfxDoneMsg`) was wrong.
+- `learn_count = 0` is misleading: the assign happens, but the "learned" log only fires when value CHANGES; since initial == observed, no log.
+- `sp_complete` fires ~26 times per 60s run (audio + gfx); `dp_complete` fires ~3 times (gfx only).
+- bossMainloop receives **20× type=1 (RETRACE), 0× type=2 (DONE)** — sp/dp complete fire correctly but DONEs don't reach clientQ.
 
-**Try next:**
-- Lazy-learn `&localGfxDoneMsg` from FIRST healthy submission (no hardcoded fallback).
-- Skip heal on first frame entirely if we haven't learned yet.
-- Recv-side filter in `mesgqueue.cpp::do_recv` to drop msgs whose `gen.type ∉ [1..5]`.
+**Real cause:** the recompiled game's `__scHandleSP → __scTaskComplete → osSendMesg(clientQ, doneMsg)` chain doesn't successfully forward DONEs even when sp/dp completion signals arrive. This is a **recompilation-level bug**, not a heal-message-corruption bug.
+
+**Hypothesis 1 (FALSIFIED 2026-05-05):** Remove hardcoded fallback `g_known_done_msg_ptr = 0` → made it WORSE (dones=[1,3,1,0,2] vs baseline [5,3,2,2,1]). Reverted.
+
+**Try next (specialist-level):**
+- Game-side `__scHandleSP` and `__scTaskComplete` recompiled versions need inspection
+- `OS_EVENT_SP` registers msg=`0x29B` which is the SP-DONE message ID (not a pointer); verify recompiled __scHandleSP correctly handles this case
+- Trace why DONE msgs aren't being osSendMesg'd to clientQ
+
+This requires N64Recomp / N64 OS scheduler expertise.
 
 ### 2. Scene triangles not reaching pixel shader
 **Symptom:** When game advances frames (DONEs > 100), the rainbow-test pixel shader (which colors each fragment by screen position) produces ZERO visible output. But `FORCE_MAGENTA` does work in earlier-stage runs.
