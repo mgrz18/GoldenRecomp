@@ -127,10 +127,13 @@ GE_FORCE_SHADE=1 GE_RAW_VTX_COLOR=1 GE_DEEP_SHADOW=1 GE_REMAP_VTX=1 GE_LOCK_MATR
 
 **Hypothesis 1 (FALSIFIED 2026-05-05):** Remove hardcoded fallback `g_known_done_msg_ptr = 0` → made it WORSE (dones=[1,3,1,0,2] vs baseline [5,3,2,2,1]). Reverted.
 
+**Hypothesis 2 (PARTIAL 2026-05-05):** Bypass game's `__scTaskComplete` entirely — inject DONE msg directly into `clientQ` at `0x80141C90` with `DONE_MSG=0x803B38B8` after each gfx task. **Result: 2/8 wins (25%) vs 1/5 baseline (20%).** Marginal improvement, not deterministic. The injection succeeds (`osSendMesg` returns 0) but bossMainloop's NOBLOCK drain at `workbench_theboy.c:616` eats it before pendingGfx > 0. Code: `lib/N64ModernRuntime/ultramodern/src/events.cpp:368+`. Disable via `GE_NO_INJECT_DONE=1`.
+
 **Try next (specialist-level):**
-- Game-side `__scHandleSP` and `__scTaskComplete` recompiled versions need inspection
-- `OS_EVENT_SP` registers msg=`0x29B` which is the SP-DONE message ID (not a pointer); verify recompiled __scHandleSP correctly handles this case
-- Trace why DONE msgs aren't being osSendMesg'd to clientQ
+- Game-side `__scHandleSP` and `__scTaskComplete` recompiled versions need inspection — these are in `RecompiledFuncs/` (specifically the recompiled sched.c)
+- `OS_EVENT_SP` registers msg=`0x29B` which is the SP-DONE message ID (not a pointer); verify recompiled `__scHandleSP` correctly handles this case
+- Trace why DONE msgs aren't being osSendMesg'd to clientQ from the recompiled binary
+- Possible: spawn a continuous "DONE heartbeat" thread that injects every 16ms (VI rate), but won't help if bossMainloop never reaches the pendingGfx>0 state
 
 This requires N64Recomp / N64 OS scheduler expertise.
 
