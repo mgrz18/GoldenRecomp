@@ -722,7 +722,16 @@ int main(int argc, char** argv) {
     // Auto-start the game if -level_NN is on the command line (debugging aid).
     bool autostart = false;
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "-level_", 7) == 0) { autostart = true; break; }
+        if (strncmp(argv[i], "-level_", 7) == 0) {
+            autostart = true;
+            // Forward the requested level into the GoldenEye token region (0x00FFB000)
+            // served by osPiReadIo_recomp, so the game actually boots into the level
+            // instead of parking on the title screen. (The level number was previously
+            // parsed only to set autostart, then discarded — see recomp_api.cpp.)
+            extern char g_boot_level_token[16];
+            snprintf(g_boot_level_token, sizeof(g_boot_level_token), "%s", argv[i]);
+            break;
+        }
     }
     if (autostart) {
         std::thread([](){

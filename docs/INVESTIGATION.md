@@ -25,6 +25,22 @@ Blocker #1 is NOT "DONEs don't reach the boss." It is: **bossMainloop only submi
 ### Next step
 `brew install llvm` + reconfigure a **separate** build dir with `-DSKIP_PATCHES=OFF` (keep the known-good build intact), then instrument `g_MainStageNum` + `pendingGfx` over time in `bossMainloop` to pinpoint why submission stops at the boot→level transition.
 
+## UPDATE 2026-06-15 (cont.) — ROOT CAUSE of "stuck at title" found + partial fix landed
+
+Followed the lead above. Confirmed via the binary's own `g_MainStageNum=%d ... iter=%d` log: the game stays at iter=1 with `g_MainStageNum=-1` because **g_StageNum stays `LEVELID_TITLE` (90) — the `-level_NN` command-line value never reached the game's token region.**
+
+- On real N64 the loader writes the setup string ("-level_10 -ml0 …") into PI space `0x00FFB000`; `tokenReadIo` reads it and `bossMainloop`'s `tokenFind(1,"-level_")` sets g_StageNum.
+- On this port `osPiReadIo_recomp` (`src/game/recomp_api.cpp`) served `0x00FFB000` from a **hardcoded** `ge_default_tokens` with NO `-level_` token. And `src/main/main.cpp` parsed `-level_NN` only to set `autostart`, **discarding the number**. So `tokenFind` always returned NULL → title forever. This is why injecting DONEs never helped: gfx wasn't the limiter, the stage was never selected.
+
+**FIX LANDED (src/, compiles directly — NOT patches):** `src/main/main.cpp` now copies the `-level_NN` arg into a global `g_boot_level_token`; `src/game/recomp_api.cpp` `ge_get_tokens()` prepends it to the served `0x00FFB000` string. Verified: the served string is now `"-level_10 -ml0 …"`.
+
+**RESULT: real progress, not done.** With the fix the game moves from "stuck at title forever" to **actually attempting a level load** (`lvlStageLoad(...)` now runs; previously never reached). BUT it then **crashes during level load** (≈5 suppressed ObjC/thread crashes/run) and still renders nothing (`fbs_content=0`).
+
+**Caveats / next:**
+- The binary runs the **pre-generated** `RecompiledPatches/patches.c` (the contributor's more-instrumented version), which differs from the committed `patches/workbench_theboy.c`. Observed `lvlStageLoad(30)` for `-level_10` (LEVELID remap, or the binary's token parse differs). To make the binary honor the committed source exactly, regenerate patches — blocked: `N64Recomp patches.toml` fails with `Undefined symbol: stderr` (the libc/stdio.h shim's `stderr`/`fprintf` need to be defined/reference-symbols the way the contributor's env had them).
+- Patch toolchain status (set up this session): `brew install llvm` (MIPS-capable clang) ✅; `ld.lld` at `/opt/homebrew/bin/ld.lld` ✅; `lib/ge/include` was a broken symlink to a Linux path → repointed to local `goldeneye_decomp/include` ✅; added `goldeneye_decomp/include/libc/stdio.h` shim ✅; `patches/` now compiles + links to `patches.elf` ✅; only the N64Recomp `stderr` symbol blocks regeneration.
+- Next frontier: the level-load crash (likely memory pool `-ma`/`-mt` per-level, or the F3D_Gold rendering blockers #2–#6), and resolving the `stderr` symbol so the committed `-level_` source path drives the binary.
+
 ## Pipeline overview
 
 ```
