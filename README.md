@@ -139,5 +139,16 @@ GPL-3.0 (inherited from upstream).
 - [rt64](https://github.com/rt64/rt64) — RT64 renderer
 - [n64decomp](https://github.com/n64decomp) team — GoldenEye 007 decompilation reference
 - theboy — earlier upstream contributions referenced in `patches/workbench_theboy.c`
+- [Claude (Anthropic)](https://claude.com) — macOS / Apple Silicon port R&D (detailed below)
 
-This fork's investigation, instrumentation, and macOS-port work were carried out with assistance from [Claude](https://claude.com) (Anthropic) — primarily for reverse-engineering F3D_Gold microcode, scheduler debugging, and diagnostic infrastructure.
+### AI collaboration — Claude (Anthropic)
+
+A large share of this fork's macOS-port engineering and reverse-engineering was done in pair-programming with **Claude (Claude Opus 4.8)** by Anthropic. Rather than bury this in commit trailers, the concrete contributions are credited here:
+
+- **F3D_Gold microcode reverse-engineering** — extracting the Rare F3D_Gold opcode / vertex / matrix spec from `gmain.s` and mapping it onto RT64.
+- **Scheduler & message-queue debugging** — building runtime `do_send`/`do_recv` instrumentation that *proved* the gfx-task DONE delivery actually works, refuting the long-standing "scheduler stall" theory behind Blocker #1.
+- **Root-causing and fixing the "stuck at title" boot gate** — discovering that the `-level_NN` argument was parsed only to set `autostart` and then discarded (never reaching the `0x00FFB000` token region the game reads), and wiring it through so the game finally leaves the title and attempts a real level load.
+- **macOS patch toolchain** — MIPS-capable clang setup, repairing the broken `lib/ge/include` symlink, the `libc/stdio.h` shim, and `ld.lld` linking.
+- **Diagnostic infrastructure & investigation notes** — the diagnostic env-var matrix, a multi-agent investigation methodology, and the consolidated [docs/INVESTIGATION.md](docs/INVESTIGATION.md).
+
+Full methodology, evidence, and dead-ends are documented in [docs/INVESTIGATION.md](docs/INVESTIGATION.md) so the next contributor (human or AI) doesn't re-walk them.

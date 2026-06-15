@@ -2,6 +2,62 @@
 
 Consolidated technical knowledge from the multi-session R&D effort. Read this before attacking any of the open blockers — most hypotheses have already been tested.
 
+## ⚠️ UPDATE 2026-06-15 — Blocker #1 reframed: DONE delivery WORKS; the real gate is the gfx loop not self-sustaining
+
+Multi-agent hypothesis attack + runtime-side instrumentation overturned the original Blocker #1 premise.
+
+### Critical build gotcha — READ FIRST
+- **`patches/*.c` do NOT compile in this build dir.** `SKIP_PATCHES:BOOL=ON` in `build/CMakeCache.txt`, and `llvm-objcopy` is missing (the MIPS patch toolchain is incomplete on this Mac), so the `patches/ → patches.elf → N64Recomp → RecompiledPatches/patches.c` pipeline is disabled; the build compiles the **pre-generated** `RecompiledPatches/patches.c`. **Editing `patches/workbench_theboy.c` (incl. `bossMainloop`) is a NO-OP** until you `brew install llvm` and reconfigure with `-DSKIP_PATCHES=OFF`. (An earlier "boss decrement" metric was invalid for this reason — the log never compiled.)
+- `RecompiledFuncs/*.c` (e.g. `funcs_0.c`) and `lib/N64ModernRuntime/**` (`mesgqueue.cpp`, `events.cpp`) **do** compile directly — instrument/fix there.
+- The harness `dones` metric (`grep -c 'type=2'`) only counts `funcs_0.c:6959`, **capped at ≤5** — useless as a success signal. Use the runtime `do_recv` counter below.
+
+### Reliable runtime-side metric (compiles)
+Instrument `do_recv` (mesgqueue.cpp) at the clientQ (`0x80141C90`) return point: count non-RETRACE (type≠1) messages the boss actually dequeues = DONEs truly delivered to `bossMainloop`. Pair with a `do_send`→clientQ type=2 log.
+
+### Findings (GE_NO_INJECT_DONE=1, 60s, valid metric)
+- **DONE delivery is NOT broken.** `__scTaskComplete` generates type=2 DONEs, `do_send` enqueues them to clientQ, and `do_recv` returns them to the boss with **type=2 intact** (not overwritten, not starved). The boss loops ~5500×/60s draining retraces — it is NOT stalled on recv.
+- BUT only **~3 gfx tasks are submitted and ~2 real DONEs generated** in 60s, then submission stops. The **default injection band-aid** (GE_NO_INJECT_DONE unset) is the ONLY thing limping the game to the documented ~40-50% content — it papers over the fact that the **natural gfx submission loop does not self-sustain past boot**.
+- Hyp4 (`funcs_0.c:6928` mask `0x3→0x2`, "forward DONE on RSP bit alone") tested with the valid metric: marginal (1→2 DONEs), **NOT the fix**. Reverted.
+
+### Reframed root cause
+Blocker #1 is NOT "DONEs don't reach the boss." It is: **bossMainloop only submits gfx in the `g_MainStageNum < 0 && pendingGfx < 2` boot path (`workbench_theboy.c:644`); once boot ends / the level should load, submission doesn't continue.** Reaching `dones>=100` requires the game to ADVANCE past boot into continuous scene rendering — overlapping Blockers #2/#3, not a scheduler/queue fix.
+
+### Next step
+`brew install llvm` + reconfigure a **separate** build dir with `-DSKIP_PATCHES=OFF` (keep the known-good build intact), then instrument `g_MainStageNum` + `pendingGfx` over time in `bossMainloop` to pinpoint why submission stops at the boot→level transition.
+
+## UPDATE 2026-06-15 (cont.) — ROOT CAUSE of "stuck at title" found + partial fix landed
+
+Followed the lead above. Confirmed via the binary's own `g_MainStageNum=%d ... iter=%d` log: the game stays at iter=1 with `g_MainStageNum=-1` because **g_StageNum stays `LEVELID_TITLE` (90) — the `-level_NN` command-line value never reached the game's token region.**
+
+- On real N64 the loader writes the setup string ("-level_10 -ml0 …") into PI space `0x00FFB000`; `tokenReadIo` reads it and `bossMainloop`'s `tokenFind(1,"-level_")` sets g_StageNum.
+- On this port `osPiReadIo_recomp` (`src/game/recomp_api.cpp`) served `0x00FFB000` from a **hardcoded** `ge_default_tokens` with NO `-level_` token. And `src/main/main.cpp` parsed `-level_NN` only to set `autostart`, **discarding the number**. So `tokenFind` always returned NULL → title forever. This is why injecting DONEs never helped: gfx wasn't the limiter, the stage was never selected.
+
+**FIX LANDED (src/, compiles directly — NOT patches):** `src/main/main.cpp` now copies the `-level_NN` arg into a global `g_boot_level_token`; `src/game/recomp_api.cpp` `ge_get_tokens()` prepends it to the served `0x00FFB000` string. Verified: the served string is now `"-level_10 -ml0 …"`.
+
+**RESULT: real progress, not done.** With the fix the game moves from "stuck at title forever" to **actually attempting a level load** (`lvlStageLoad(...)` now runs; previously never reached). BUT it then **crashes during level load** (≈5 suppressed ObjC/thread crashes/run) and still renders nothing (`fbs_content=0`).
+
+**Caveats / next:**
+- The binary runs the **pre-generated** `RecompiledPatches/patches.c` (the contributor's more-instrumented version), which differs from the committed `patches/workbench_theboy.c`. Observed `lvlStageLoad(30)` for `-level_10` (LEVELID remap, or the binary's token parse differs). To make the binary honor the committed source exactly, regenerate patches — blocked: `N64Recomp patches.toml` fails with `Undefined symbol: stderr` (the libc/stdio.h shim's `stderr`/`fprintf` need to be defined/reference-symbols the way the contributor's env had them).
+- Patch toolchain status (set up this session): `brew install llvm` (MIPS-capable clang) ✅; `ld.lld` at `/opt/homebrew/bin/ld.lld` ✅; `lib/ge/include` was a broken symlink to a Linux path → repointed to local `goldeneye_decomp/include` ✅; added `goldeneye_decomp/include/libc/stdio.h` shim ✅; `patches/` now compiles + links to `patches.elf` ✅; only the N64Recomp `stderr` symbol blocks regeneration.
+- Next frontier: the level-load crash (likely memory pool `-ma`/`-mt` per-level, or the F3D_Gold rendering blockers #2–#6), and resolving the `stderr` symbol so the committed `-level_` source path drives the binary.
+
+## UPDATE 2026-06-15 (cont.) — F3D_Gold attack map: two theories falsified, Fast3D is the path
+
+Multi-agent F3D_Gold analysis + adversarial synthesis + a crash characterization run. Net: **three candidate root causes for the "garbage geometry" are now ruled out**, which points the strategy at borrowing Perfect Dark's renderer rather than continuing to reverse-engineer RT64's F3D_Gold path.
+
+### Falsified
+- **"Dead segment table / RT64 moveWord bitfield bug"** (a tempting lead) — FALSE. The decomp uses stock `gbi.h`; `gImmp21` encodes `w0=(c<<24)|(p0<<8)|(p1<<0)`, so `G_MW_SEGMENT(0x06)` lands in bits 0-7 and RT64's `p0(0,8)` reads it **correctly**. Also the observed garbage addresses are **segment 0** and matrices are plain `osVirtualToPhysical` physical pointers — not a segment-table problem.
+- **"Level-load crash poisons geometry"** — FALSE. `GE_CRASH_VERBOSE=1` shows all ~5 suppressed crashes are pure ObjC **thread-teardown** (`thread_start → _pthread_exit → _pthread_tsd_cleanup → objc_autoreleasePoolPop → AutoreleasePoolPage::releaseUntil`), `si_addr` in the ObjC heap, NOT the gfx_thread/RT64. The `PC+=4` suppression is correct; it does not corrupt rendering.
+- **"OOB RDRAM reads"** — FALSE. Added a bounds check in `State::fromRDRAM` (`rt64_state.cpp`); **0 OOB** across a level-10 run.
+
+### Where that leaves the geometry corruption
+The "physical pointer resolves to DL-stream bytes" symptom is real and upstream, but its mechanism is **unconfirmed** after the above eliminations. Combiner/alpha (#4) is downstream and already neutered in `RasterPS.hlsl` (do not touch). So visible geometry via the **RT64 F3D_Gold path is weeks-out and uncertain**.
+
+### Recommended path: vendor Perfect Dark's Fast3D (GBI-level HLE)
+PD uses the same Rare microcode lineage and its shipping arm64 macOS binary is a confirmed Fast3D-on-GL GBI interpreter (verified strings in `~/Cosas/pd-arm64-osx/pd.arm64`). Fast3D consumes the already-emitted `Gfx[]` stream and **deletes the whole RSP-emulation addressing bug class** RT64 is stuck on. Estimate: ~1–2 weeks to vendor `fast3d/{gfx_pc,gfx_opengl,gfx_cc}` from `fgsfdsfgs/perfect_dark@port` behind `GE_USE_FAST3D=1`, wire it at the `submit_rsp_task` boundary, and get one `-level_10` frame to >250k non-zero pixels. Higher risk-adjusted payoff than incrementally fixing RT64.
+
+Diagnostic/safety changes landed this pass (harmless, gated/defensive): `GE_CRASH_VERBOSE` full-backtrace classification in `crash_handler`; bounds-checked `State::fromRDRAM`.
+
 ## Pipeline overview
 
 ```

@@ -39,6 +39,32 @@ extern "C" void osDpGetCounters_recomp(uint8_t* rdram, recomp_context* ctx) {
 // -ma = mema pool size in KB (most critical value)
 static const char ge_default_tokens[] = "-ml0 -me0 -mgfx100 -mvtx50 -mt625 -ma300";
 
+// Level token forwarded from the command line (-level_NN) by main.cpp. When non-empty,
+// it is prepended to the token string served at 0x00FFB000 so the game boots straight
+// into that level (the game reads it via tokenReadIo -> tokenFind("-level_") in bossMainloop).
+char g_boot_level_token[16] = {0};
+
+// Build (once) the token string actually served at 0x00FFB000:
+//   "<-level_NN> -ml0 -me0 ..."  if a level was requested, else just the pool defaults.
+static const char* ge_get_tokens(uint32_t* out_len) {
+    static char buf[128];
+    static uint32_t buf_len = 0;
+    static bool built = false;
+    if (!built) {
+        int n;
+        if (g_boot_level_token[0] != '\0') {
+            n = snprintf(buf, sizeof(buf), "%s %s", g_boot_level_token, ge_default_tokens);
+        } else {
+            n = snprintf(buf, sizeof(buf), "%s", ge_default_tokens);
+        }
+        buf_len = (n > 0 ? (uint32_t)n : 0) + 1; // include NUL terminator
+        built = true;
+        fprintf(stderr, "[INFO] ge_tokens served: \"%s\" (level_token=\"%s\")\n", buf, g_boot_level_token);
+    }
+    if (out_len) *out_len = buf_len;
+    return buf;
+}
+
 extern "C" void osPiReadIo_recomp(uint8_t* rdram, recomp_context* ctx) {
     // osPiReadIo(u32 devAddr, u32 *data): reads a word from PI bus
     uint32_t devAddr = (uint32_t)ctx->r4;
@@ -57,10 +83,12 @@ extern "C" void osPiReadIo_recomp(uint8_t* rdram, recomp_context* ctx) {
     } else if (devAddr >= 0x00FFB000 && devAddr < 0x00FFB000 + 640) {
         static bool logged = false;
         if (!logged) { fprintf(stderr, "[INFO] osPiReadIo: reading tokens from 0x%08X\n", devAddr); logged = true; }
-        // GoldenEye token area - provide default setup string
+        // GoldenEye token area - provide setup string (prepended with -level_ if requested)
         uint32_t offset = devAddr - 0x00FFB000;
-        const uint8_t* src = (const uint8_t*)ge_default_tokens + offset;
-        uint32_t remaining = sizeof(ge_default_tokens) - offset;
+        uint32_t tok_len = 0;
+        const char* tokens = ge_get_tokens(&tok_len);
+        const uint8_t* src = (const uint8_t*)tokens + offset;
+        uint32_t remaining = (offset < tok_len) ? (tok_len - offset) : 0;
         uint8_t b0 = remaining > 0 ? src[0] : 0;
         uint8_t b1 = remaining > 1 ? src[1] : 0;
         uint8_t b2 = remaining > 2 ? src[2] : 0;

@@ -577,8 +577,19 @@ static void crash_handler(int sig, siginfo_t* info, void* ucontext) {
 
     if (is_objc_crash) {
         static int objc_crash_count = 0;
-        if (objc_crash_count++ < 5) {
+        objc_crash_count++;
+        if (objc_crash_count <= 5) {
             fprintf(stderr, "[WARN] ObjC/thread crash suppressed (ignoring)\n");
+        }
+        // GE_CRASH_VERBOSE: dump the full classification of each "suppressed" crash so we can
+        // tell whether the faulting thread is the gfx_thread (rt64_rsp/rt64_interpreter) — i.e.
+        // whether the PC+=4 resume is silently poisoning state and manufacturing garbage geometry.
+        if (getenv("GE_CRASH_VERBOSE")) {
+            ucontext_t* ucv = (ucontext_t*)ucontext;
+            fprintf(stderr, "\n=== [GE_CRASH_VERBOSE] suppressed crash #%d: sig %d (%s) si_addr=%p pc=0x%llx ===\n",
+                objc_crash_count, sig, sig == SIGBUS ? "SIGBUS" : sig == SIGSEGV ? "SIGSEGV" : "?",
+                info->si_addr, (unsigned long long)ucv->uc_mcontext->__ss.__pc);
+            if (syms) { for (int i = 0; i < count; i++) fprintf(stderr, "    %s\n", syms[i]); }
         }
         if (syms) free(syms);
         #if defined(__aarch64__)
@@ -722,7 +733,16 @@ int main(int argc, char** argv) {
     // Auto-start the game if -level_NN is on the command line (debugging aid).
     bool autostart = false;
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "-level_", 7) == 0) { autostart = true; break; }
+        if (strncmp(argv[i], "-level_", 7) == 0) {
+            autostart = true;
+            // Forward the requested level into the GoldenEye token region (0x00FFB000)
+            // served by osPiReadIo_recomp, so the game actually boots into the level
+            // instead of parking on the title screen. (The level number was previously
+            // parsed only to set autostart, then discarded — see recomp_api.cpp.)
+            extern char g_boot_level_token[16];
+            snprintf(g_boot_level_token, sizeof(g_boot_level_token), "%s", argv[i]);
+            break;
+        }
     }
     if (autostart) {
         std::thread([](){
