@@ -2,6 +2,29 @@
 
 Consolidated technical knowledge from the multi-session R&D effort. Read this before attacking any of the open blockers — most hypotheses have already been tested.
 
+## ⚠️ UPDATE 2026-06-15 — Blocker #1 reframed: DONE delivery WORKS; the real gate is the gfx loop not self-sustaining
+
+Multi-agent hypothesis attack + runtime-side instrumentation overturned the original Blocker #1 premise.
+
+### Critical build gotcha — READ FIRST
+- **`patches/*.c` do NOT compile in this build dir.** `SKIP_PATCHES:BOOL=ON` in `build/CMakeCache.txt`, and `llvm-objcopy` is missing (the MIPS patch toolchain is incomplete on this Mac), so the `patches/ → patches.elf → N64Recomp → RecompiledPatches/patches.c` pipeline is disabled; the build compiles the **pre-generated** `RecompiledPatches/patches.c`. **Editing `patches/workbench_theboy.c` (incl. `bossMainloop`) is a NO-OP** until you `brew install llvm` and reconfigure with `-DSKIP_PATCHES=OFF`. (An earlier "boss decrement" metric was invalid for this reason — the log never compiled.)
+- `RecompiledFuncs/*.c` (e.g. `funcs_0.c`) and `lib/N64ModernRuntime/**` (`mesgqueue.cpp`, `events.cpp`) **do** compile directly — instrument/fix there.
+- The harness `dones` metric (`grep -c 'type=2'`) only counts `funcs_0.c:6959`, **capped at ≤5** — useless as a success signal. Use the runtime `do_recv` counter below.
+
+### Reliable runtime-side metric (compiles)
+Instrument `do_recv` (mesgqueue.cpp) at the clientQ (`0x80141C90`) return point: count non-RETRACE (type≠1) messages the boss actually dequeues = DONEs truly delivered to `bossMainloop`. Pair with a `do_send`→clientQ type=2 log.
+
+### Findings (GE_NO_INJECT_DONE=1, 60s, valid metric)
+- **DONE delivery is NOT broken.** `__scTaskComplete` generates type=2 DONEs, `do_send` enqueues them to clientQ, and `do_recv` returns them to the boss with **type=2 intact** (not overwritten, not starved). The boss loops ~5500×/60s draining retraces — it is NOT stalled on recv.
+- BUT only **~3 gfx tasks are submitted and ~2 real DONEs generated** in 60s, then submission stops. The **default injection band-aid** (GE_NO_INJECT_DONE unset) is the ONLY thing limping the game to the documented ~40-50% content — it papers over the fact that the **natural gfx submission loop does not self-sustain past boot**.
+- Hyp4 (`funcs_0.c:6928` mask `0x3→0x2`, "forward DONE on RSP bit alone") tested with the valid metric: marginal (1→2 DONEs), **NOT the fix**. Reverted.
+
+### Reframed root cause
+Blocker #1 is NOT "DONEs don't reach the boss." It is: **bossMainloop only submits gfx in the `g_MainStageNum < 0 && pendingGfx < 2` boot path (`workbench_theboy.c:644`); once boot ends / the level should load, submission doesn't continue.** Reaching `dones>=100` requires the game to ADVANCE past boot into continuous scene rendering — overlapping Blockers #2/#3, not a scheduler/queue fix.
+
+### Next step
+`brew install llvm` + reconfigure a **separate** build dir with `-DSKIP_PATCHES=OFF` (keep the known-good build intact), then instrument `g_MainStageNum` + `pendingGfx` over time in `bossMainloop` to pinpoint why submission stops at the boot→level transition.
+
 ## Pipeline overview
 
 ```
