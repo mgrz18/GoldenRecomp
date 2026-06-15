@@ -577,8 +577,19 @@ static void crash_handler(int sig, siginfo_t* info, void* ucontext) {
 
     if (is_objc_crash) {
         static int objc_crash_count = 0;
-        if (objc_crash_count++ < 5) {
+        objc_crash_count++;
+        if (objc_crash_count <= 5) {
             fprintf(stderr, "[WARN] ObjC/thread crash suppressed (ignoring)\n");
+        }
+        // GE_CRASH_VERBOSE: dump the full classification of each "suppressed" crash so we can
+        // tell whether the faulting thread is the gfx_thread (rt64_rsp/rt64_interpreter) — i.e.
+        // whether the PC+=4 resume is silently poisoning state and manufacturing garbage geometry.
+        if (getenv("GE_CRASH_VERBOSE")) {
+            ucontext_t* ucv = (ucontext_t*)ucontext;
+            fprintf(stderr, "\n=== [GE_CRASH_VERBOSE] suppressed crash #%d: sig %d (%s) si_addr=%p pc=0x%llx ===\n",
+                objc_crash_count, sig, sig == SIGBUS ? "SIGBUS" : sig == SIGSEGV ? "SIGSEGV" : "?",
+                info->si_addr, (unsigned long long)ucv->uc_mcontext->__ss.__pc);
+            if (syms) { for (int i = 0; i < count; i++) fprintf(stderr, "    %s\n", syms[i]); }
         }
         if (syms) free(syms);
         #if defined(__aarch64__)

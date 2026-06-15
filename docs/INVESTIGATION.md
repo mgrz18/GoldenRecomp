@@ -41,6 +41,23 @@ Followed the lead above. Confirmed via the binary's own `g_MainStageNum=%d ... i
 - Patch toolchain status (set up this session): `brew install llvm` (MIPS-capable clang) ✅; `ld.lld` at `/opt/homebrew/bin/ld.lld` ✅; `lib/ge/include` was a broken symlink to a Linux path → repointed to local `goldeneye_decomp/include` ✅; added `goldeneye_decomp/include/libc/stdio.h` shim ✅; `patches/` now compiles + links to `patches.elf` ✅; only the N64Recomp `stderr` symbol blocks regeneration.
 - Next frontier: the level-load crash (likely memory pool `-ma`/`-mt` per-level, or the F3D_Gold rendering blockers #2–#6), and resolving the `stderr` symbol so the committed `-level_` source path drives the binary.
 
+## UPDATE 2026-06-15 (cont.) — F3D_Gold attack map: two theories falsified, Fast3D is the path
+
+Multi-agent F3D_Gold analysis + adversarial synthesis + a crash characterization run. Net: **three candidate root causes for the "garbage geometry" are now ruled out**, which points the strategy at borrowing Perfect Dark's renderer rather than continuing to reverse-engineer RT64's F3D_Gold path.
+
+### Falsified
+- **"Dead segment table / RT64 moveWord bitfield bug"** (a tempting lead) — FALSE. The decomp uses stock `gbi.h`; `gImmp21` encodes `w0=(c<<24)|(p0<<8)|(p1<<0)`, so `G_MW_SEGMENT(0x06)` lands in bits 0-7 and RT64's `p0(0,8)` reads it **correctly**. Also the observed garbage addresses are **segment 0** and matrices are plain `osVirtualToPhysical` physical pointers — not a segment-table problem.
+- **"Level-load crash poisons geometry"** — FALSE. `GE_CRASH_VERBOSE=1` shows all ~5 suppressed crashes are pure ObjC **thread-teardown** (`thread_start → _pthread_exit → _pthread_tsd_cleanup → objc_autoreleasePoolPop → AutoreleasePoolPage::releaseUntil`), `si_addr` in the ObjC heap, NOT the gfx_thread/RT64. The `PC+=4` suppression is correct; it does not corrupt rendering.
+- **"OOB RDRAM reads"** — FALSE. Added a bounds check in `State::fromRDRAM` (`rt64_state.cpp`); **0 OOB** across a level-10 run.
+
+### Where that leaves the geometry corruption
+The "physical pointer resolves to DL-stream bytes" symptom is real and upstream, but its mechanism is **unconfirmed** after the above eliminations. Combiner/alpha (#4) is downstream and already neutered in `RasterPS.hlsl` (do not touch). So visible geometry via the **RT64 F3D_Gold path is weeks-out and uncertain**.
+
+### Recommended path: vendor Perfect Dark's Fast3D (GBI-level HLE)
+PD uses the same Rare microcode lineage and its shipping arm64 macOS binary is a confirmed Fast3D-on-GL GBI interpreter (verified strings in `~/Cosas/pd-arm64-osx/pd.arm64`). Fast3D consumes the already-emitted `Gfx[]` stream and **deletes the whole RSP-emulation addressing bug class** RT64 is stuck on. Estimate: ~1–2 weeks to vendor `fast3d/{gfx_pc,gfx_opengl,gfx_cc}` from `fgsfdsfgs/perfect_dark@port` behind `GE_USE_FAST3D=1`, wire it at the `submit_rsp_task` boundary, and get one `-level_10` frame to >250k non-zero pixels. Higher risk-adjusted payoff than incrementally fixing RT64.
+
+Diagnostic/safety changes landed this pass (harmless, gated/defensive): `GE_CRASH_VERBOSE` full-backtrace classification in `crash_handler`; bounds-checked `State::fromRDRAM`.
+
 ## Pipeline overview
 
 ```
