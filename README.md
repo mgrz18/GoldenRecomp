@@ -1,3 +1,19 @@
+> [!IMPORTANT]
+> **Archived — this line of work moved on.** Look at
+> **[mgrz18/mgb64](https://github.com/mgrz18/mgb64)** instead: a native source
+> port built on the GoldenEye decompilation, which plays all 20 levels, renders
+> the skybox, and holds a steady 60fps on Apple Silicon. For the static-recomp
+> route, [mgrz18/GoldenEye64Recomp](https://github.com/mgrz18/GoldenEye64Recomp)
+> (from [cblock85](https://github.com/cblock85/GoldenEye64Recomp)) reaches
+> gameplay with RT64 and has working mouse look.
+>
+> This repository never got past corrupted geometry. Its upstream
+> (`kholdfuzion/GoldenRecomp`) depends on a `goldeneye_src` URL that 404s, so
+> `lib/ge` cannot be initialised and nothing here can be regenerated. Kept
+> read-only for the investigation record in
+> [docs/INVESTIGATION.md](docs/INVESTIGATION.md) — the hypotheses ruled out
+> there may still save someone time.
+
 # GoldenRecomp — macOS port (work in progress)
 
 Native macOS port of GoldenEye 007 (N64) using static recompilation via [N64ModernRuntime](https://github.com/Mr-Wiseguy/N64ModernRuntime) + [RT64](https://github.com/rt64/rt64).
